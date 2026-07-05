@@ -1,6 +1,7 @@
 # Секреты и локальные данные — НЕ коммитить
 config.py
 *.env
+CLAUDE.md
 
 # Состояние рантайма
 mute_state.json
