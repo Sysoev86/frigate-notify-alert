@@ -10,6 +10,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+APPDIR="$(pwd)"                 # реальный путь установки — подставляется в юниты
 SERVICE_CONTROL="frigate-telegram-control"
 UNIT_TPL="frigate-telegram@"   # шаблонный юнит, инстанс = имя группы
 
@@ -71,9 +72,10 @@ case "${1:-}" in
         echo "✅ Автозапуск отключён"
         ;;
     install)
-        echo "📦 Установка юнитов (шаблон групп + пульт)"
-        cp "${UNIT_TPL}.service" /etc/systemd/system/
-        cp "${SERVICE_CONTROL}.service" /etc/systemd/system/
+        echo "📦 Установка юнитов (шаблон групп + пульт), путь: $APPDIR"
+        # Подставляем реальный путь установки вместо плейсхолдера __APPDIR__
+        sed "s#__APPDIR__#${APPDIR}#g" "${UNIT_TPL}.service"     > "/etc/systemd/system/${UNIT_TPL}.service"
+        sed "s#__APPDIR__#${APPDIR}#g" "${SERVICE_CONTROL}.service" > "/etc/systemd/system/${SERVICE_CONTROL}.service"
         systemctl daemon-reload
         for g in $GROUPS_LIST; do systemctl enable "${UNIT_TPL}${g}"; done
         systemctl enable "$SERVICE_CONTROL"
