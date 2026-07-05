@@ -1,8 +1,8 @@
 [Unit]
-# Шаблонный сервис: %i — имя группы из config.py (GROUPS).
-# __APPDIR__ автоматически заменяется на реальный путь при `./manage.sh install`.
-# Запуск любой группы: systemctl enable --now frigate-telegram@group3
-Description=Frigate Telegram Monitor - группа %i
+# Templated service: %i is a group name from config.py (GROUPS).
+# __APPDIR__ is replaced with the real install path by `./manage.sh install`.
+# Start any group with: systemctl enable --now frigate-telegram@group3
+Description=Frigate Telegram Monitor - group %i
 After=network.target
 
 [Service]

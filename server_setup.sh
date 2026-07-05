@@ -1,44 +1,33 @@
 #!/bin/bash
+# One-shot server setup: dependencies + systemd units + start.
+# Run from the cloned repo: sudo bash server_setup.sh
 
-# Скрипт для настройки сервера Frigate Telegram Monitor
-# Запускать на сервере: bash server_setup.sh
-
-echo "🚀 Настройка Frigate Telegram Monitor на сервере..."
-
-# Работаем в каталоге, где лежит этот скрипт (куда склонирован репозиторий)
+set -e
 cd "$(dirname "$0")"
 
-echo "📁 Каталог установки: $(pwd)"
+echo "🚀 Setting up frigate-notify-alert..."
+echo "📁 Install directory: $(pwd)"
 
-# Проверка, что config.py создан
 if [ ! -f config.py ]; then
-    echo "❌ Нет config.py. Сначала: cp config.example.py config.py и заполни его."
+    echo "❌ config.py not found. First: cp config.example.py config.py and fill it in."
     exit 1
 fi
 
-# Останавливаем все запущенные процессы
-echo "🛑 Остановка существующих процессов..."
+echo "🛑 Stopping any running monitors..."
 pkill -f "frigate_telegram_monitor" || true
 
-# Устанавливаем зависимости
-echo "📦 Установка зависимостей..."
+echo "📦 Installing dependencies..."
 ./install_deps.sh
 
-# Устанавливаем systemd сервисы (group1 + group2)
-echo "⚙️ Установка systemd сервисов..."
+echo "⚙️ Installing systemd units..."
 ./manage.sh install
 
-# Запускаем сервисы
-echo "🚀 Запуск сервисов..."
+echo "🚀 Starting services..."
 ./manage.sh start
 
-# Проверяем статус
-echo "📊 Статус сервисов:"
+echo "📊 Service status:"
 ./manage.sh status
 
 echo ""
-echo "✅ Настройка завершена!"
-echo ""
-echo "📋 Управление: ./manage.sh {start|stop|restart|status|logs}"
-echo "  Логи:        ./manage.sh logs"
-echo ""
+echo "✅ Setup complete!"
+echo "📋 Manage with: ./manage.sh {start|stop|restart|status|logs|update|version}"

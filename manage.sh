@@ -1,49 +1,45 @@
 #!/bin/bash
 
-# Управление сервисами Frigate Telegram Monitor.
+# Service management for frigate-notify-alert.
 #
-# Масштабируется само: список групп берётся прямо из config.py (GROUPS), а каждая
-# группа запускается шаблонным юнитом frigate-telegram@<группа>. Чтобы добавить
-# группу — впиши её в GROUPS в config.py и выполни:  ./manage.sh install && ./manage.sh start
-# Плюс один общий сервис пульта паузы: frigate-telegram-control.
+# Scales by itself: the group list is read straight from config.py (GROUPS), and
+# each group runs as a templated systemd unit frigate-telegram@<group>. To add a
+# group, put it into GROUPS and run:  ./manage.sh install && ./manage.sh start
+# Plus one shared pause-controller service: frigate-telegram-control.
 
 set -euo pipefail
 cd "$(dirname "$0")"
 
-APPDIR="$(pwd)"                 # реальный путь установки — подставляется в юниты
+APPDIR="$(pwd)"                 # real install path — substituted into the units
 SERVICE_CONTROL="frigate-telegram-control"
-UNIT_TPL="frigate-telegram@"   # шаблонный юнит, инстанс = имя группы
+UNIT_TPL="frigate-telegram@"   # templated unit, instance = group name
 
-# Список групп из config.py (config.py — чистый python без зависимостей)
+# Group list from config.py (config.py is plain python with no dependencies)
 get_groups() {
     python3 -c "from config import GROUPS; print(' '.join(GROUPS))" 2>/dev/null || {
-        echo "❌ Не удалось прочитать GROUPS из config.py" >&2; exit 1; }
+        echo "❌ Could not read GROUPS from config.py" >&2; exit 1; }
 }
 
 GROUPS_LIST="$(get_groups)"
 
-group_units() {  # печатает frigate-telegram@group1 frigate-telegram@group2 ...
-    for g in $GROUPS_LIST; do echo -n "${UNIT_TPL}${g} "; done
-}
-
 case "${1:-}" in
     start)
-        echo "🚀 Запуск: группы [$GROUPS_LIST] + пульт паузы"
+        echo "🚀 Starting: groups [$GROUPS_LIST] + pause controller"
         for g in $GROUPS_LIST; do systemctl start "${UNIT_TPL}${g}"; done
         systemctl start "$SERVICE_CONTROL"
-        echo "✅ Запущено"
+        echo "✅ Started"
         ;;
     stop)
-        echo "🛑 Остановка всех сервисов"
+        echo "🛑 Stopping all services"
         for g in $GROUPS_LIST; do systemctl stop "${UNIT_TPL}${g}" || true; done
         systemctl stop "$SERVICE_CONTROL" || true
-        echo "✅ Остановлено"
+        echo "✅ Stopped"
         ;;
     restart)
-        echo "🔄 Перезапуск всех сервисов"
+        echo "🔄 Restarting all services"
         for g in $GROUPS_LIST; do systemctl restart "${UNIT_TPL}${g}"; done
         systemctl restart "$SERVICE_CONTROL"
-        echo "✅ Перезапущено"
+        echo "✅ Restarted"
         ;;
     status)
         for g in $GROUPS_LIST; do
@@ -51,73 +47,73 @@ case "${1:-}" in
             systemctl status "${UNIT_TPL}${g}" --no-pager || true
             echo ""
         done
-        echo "=== Пульт паузы (mute controller) ==="
+        echo "=== Pause controller ==="
         systemctl status "$SERVICE_CONTROL" --no-pager || true
         ;;
     logs)
-        echo "📋 Логи всех групп + пульта (Ctrl+C для выхода)"
-        # -u принимает glob-шаблоны, поэтому ловим все инстансы разом
+        echo "📋 Live logs for all groups + controller (Ctrl+C to exit)"
+        # -u accepts glob patterns, so this catches every instance at once
         journalctl -f -u "${UNIT_TPL}*" -u "$SERVICE_CONTROL"
         ;;
     enable)
-        echo "⚙️ Автозапуск для групп [$GROUPS_LIST] + пульта"
+        echo "⚙️ Enabling autostart for groups [$GROUPS_LIST] + controller"
         for g in $GROUPS_LIST; do systemctl enable "${UNIT_TPL}${g}"; done
         systemctl enable "$SERVICE_CONTROL"
-        echo "✅ Автозапуск включён"
+        echo "✅ Autostart enabled"
         ;;
     disable)
-        echo "❌ Отключение автозапуска"
+        echo "❌ Disabling autostart"
         for g in $GROUPS_LIST; do systemctl disable "${UNIT_TPL}${g}" || true; done
         systemctl disable "$SERVICE_CONTROL" || true
-        echo "✅ Автозапуск отключён"
+        echo "✅ Autostart disabled"
         ;;
     install)
-        echo "📦 Установка юнитов (шаблон групп + пульт), путь: $APPDIR"
-        # Подставляем реальный путь установки вместо плейсхолдера __APPDIR__
+        echo "📦 Installing units (group template + controller), path: $APPDIR"
+        # Substitute the real install path for the __APPDIR__ placeholder
         sed "s#__APPDIR__#${APPDIR}#g" "${UNIT_TPL}.service"     > "/etc/systemd/system/${UNIT_TPL}.service"
         sed "s#__APPDIR__#${APPDIR}#g" "${SERVICE_CONTROL}.service" > "/etc/systemd/system/${SERVICE_CONTROL}.service"
         systemctl daemon-reload
         for g in $GROUPS_LIST; do systemctl enable "${UNIT_TPL}${g}"; done
         systemctl enable "$SERVICE_CONTROL"
-        echo "✅ Установлено и включено для групп: $GROUPS_LIST (+ пульт)"
-        echo "   Дальше: ./manage.sh start"
+        echo "✅ Installed and enabled for groups: $GROUPS_LIST (+ controller)"
+        echo "   Next: ./manage.sh start"
         ;;
     version)
         v="$(cat VERSION 2>/dev/null || echo '?')"
-        echo "📌 Локальная версия: $v"
+        echo "📌 Local version: $v"
         if git rev-parse --git-dir >/dev/null 2>&1; then
-            echo "   коммит: $(git rev-parse --short HEAD 2>/dev/null)"
+            echo "   commit: $(git rev-parse --short HEAD 2>/dev/null)"
             git fetch --tags -q origin 2>/dev/null || true
             latest="$(git tag -l 'v*' | sort -V | tail -1)"
-            echo "   последний тег: ${latest:-нет}"
+            echo "   latest tag: ${latest:-none}"
         fi
         ;;
     update)
-        echo "⬇️  Обновление до последней версии..."
-        git pull --ff-only origin main || { echo "❌ git pull не удался"; exit 1; }
-        echo "🔧 Обновляю юниты и перезапускаю..."
+        echo "⬇️  Updating to the latest version..."
+        git pull --ff-only origin main || { echo "❌ git pull failed"; exit 1; }
+        echo "🔧 Reinstalling units and restarting..."
         "$0" install
         "$0" restart
         "$0" version
-        echo "✅ Обновлено"
+        echo "✅ Updated"
         ;;
     *)
-        echo "🔧 Управление Frigate → Telegram (frigate-notify-alert)"
+        echo "🔧 frigate-notify-alert service management"
         echo ""
-        echo "Использование: $0 {install|start|stop|restart|status|logs|enable|disable|update|version}"
+        echo "Usage: $0 {install|start|stop|restart|status|logs|enable|disable|update|version}"
         echo ""
-        echo "Группы (из config.py): $GROUPS_LIST"
+        echo "Groups (from config.py): $GROUPS_LIST"
         echo ""
-        echo "  install  - поставить юниты и включить автозапуск (читает группы из config.py)"
-        echo "  update   - git pull + переустановка юнитов + рестарт (обновиться до последней версии)"
-        echo "  version  - показать локальную версию и последний тег в origin"
-        echo "  start    - запустить все группы + пульт паузы"
-        echo "  stop     - остановить всё"
-        echo "  restart  - перезапустить всё"
-        echo "  status   - статус всех групп + пульта"
-        echo "  logs     - логи всех групп + пульта"
+        echo "  install  - install units and enable autostart (reads groups from config.py)"
+        echo "  update   - git pull + reinstall units + restart (get the latest version)"
+        echo "  version  - show local version and the latest tag on origin"
+        echo "  start    - start all groups + pause controller"
+        echo "  stop     - stop everything"
+        echo "  restart  - restart everything"
+        echo "  status   - status of all groups + controller"
+        echo "  logs     - live logs of all groups + controller"
         echo ""
-        echo "➕ Добавить группу: впиши её в GROUPS (config.py), затем:"
+        echo "➕ Add a group: put it into GROUPS (config.py), then:"
         echo "   ./manage.sh install && ./manage.sh start"
         ;;
 esac

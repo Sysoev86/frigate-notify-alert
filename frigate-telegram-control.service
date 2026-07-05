@@ -1,6 +1,6 @@
 [Unit]
-# __APPDIR__ автоматически заменяется на реальный путь при `./manage.sh install`.
-Description=Frigate Telegram Monitor - Mute Controller (кнопки паузы)
+# __APPDIR__ is replaced with the real install path by `./manage.sh install`.
+Description=Frigate Telegram Monitor - Mute Controller (pause buttons)
 After=network.target
 
 [Service]

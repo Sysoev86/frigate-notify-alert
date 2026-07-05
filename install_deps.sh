@@ -1,32 +1,27 @@
 #!/bin/bash
+# Install dependencies into a local virtual environment.
 
-# Скрипт для установки зависимостей на сервере
+set -e
+cd "$(dirname "$0")"
 
-echo "🔧 Установка зависимостей для Frigate Telegram Monitor..."
+echo "🔧 Installing dependencies for frigate-notify-alert..."
 
-# Создаем виртуальное окружение если его нет
 if [ ! -d "venv" ]; then
-    echo "📦 Создание виртуального окружения..."
+    echo "📦 Creating virtual environment..."
     python3 -m venv venv
 fi
 
-# Активируем виртуальное окружение
-echo "🔄 Активация виртуального окружения..."
 source venv/bin/activate
 
-# Обновляем pip
-echo "⬆️ Обновление pip..."
-python -m pip install --upgrade pip
+echo "⬆️ Upgrading pip..."
+python -m pip install -q --upgrade pip
 
-# Устанавливаем зависимости
-echo "📥 Установка зависимостей..."
-pip install -r requirements.txt
+echo "📥 Installing requirements..."
+pip install -q -r requirements.txt
 
-echo "✅ Зависимости установлены в виртуальном окружении!"
+echo "✅ Dependencies installed into ./venv"
 echo ""
-echo "📋 Дальше:"
-echo "  ./manage.sh install  - установка systemd сервисов (group1 + group2)"
-echo "  ./manage.sh start    - запуск"
-echo "  ./run_monitor.sh     - ручной запуск без systemd"
-echo ""
-echo "💡 Виртуальное окружение создано в папке 'venv'"
+echo "📋 Next steps:"
+echo "  sudo ./manage.sh install  - install systemd units (one per group from config.py)"
+echo "  sudo ./manage.sh start    - start everything"
+echo "  ./run_monitor.sh          - manual run without systemd"
