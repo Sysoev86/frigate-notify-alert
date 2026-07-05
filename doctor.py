@@ -160,9 +160,13 @@ async def check_recent_events(cfg, http):
 # --------------------------------------------------------------------- mqtt
 
 def check_mqtt(cfg):
+    import warnings
+
     import paho.mqtt.client as mqtt
     try:
-        client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1)
     except AttributeError:  # paho-mqtt 1.x
         client = mqtt.Client()
     client.username_pw_set(cfg.MQTT_USERNAME, cfg.MQTT_PASSWORD)

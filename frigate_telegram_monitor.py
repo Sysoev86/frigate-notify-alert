@@ -484,11 +484,13 @@ class FrigateTelegramMonitor:
         if LANG == "ru":
             text = (f"🚀 Мониторинг запущен: «{name}» (v{_version()})\n"
                     f"📹 Камеры: {', '.join(self.cameras)}\n"
-                    f"🎯 Объекты: {', '.join(self.objects)} | 🧭 Зоны: {zones}")
+                    f"🎯 Объекты: {', '.join(self.objects)}\n"
+                    f"🧭 Зоны: {zones}")
         else:
             text = (f"🚀 Monitoring started: “{name}” (v{_version()})\n"
                     f"📹 Cameras: {', '.join(self.cameras)}\n"
-                    f"🎯 Objects: {', '.join(self.objects)} | 🧭 Zones: {zones}")
+                    f"🎯 Objects: {', '.join(self.objects)}\n"
+                    f"🧭 Zones: {zones}")
         try:
             await self.bot.send_message(
                 chat_id=self.group_config["telegram_chat_id"],
@@ -587,8 +589,11 @@ class FrigateTelegramMonitor:
         def mqtt_thread():
             # paho-mqtt 2.x requires an explicit callback API version;
             # VERSION1 keeps the same handler signatures as 1.x.
+            import warnings
             try:
-                self.mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1)
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", DeprecationWarning)
+                    self.mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1)
             except AttributeError:  # paho-mqtt 1.x
                 self.mqtt_client = mqtt.Client()
             self.mqtt_client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
