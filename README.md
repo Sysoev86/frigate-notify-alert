@@ -10,6 +10,7 @@
 ## Содержание
 - [Возможности](#возможности)
 - [Требования](#требования)
+- [Настройка Frigate (обязательно)](#настройка-frigate-обязательно)
 - [Установка](#установка)
 - [Конфигурация (`config.py`) — подробно](#конфигурация-configpy--подробно)
 - [Обновление](#обновление-до-последней-версии)
@@ -32,6 +33,85 @@
 - Работающий **Frigate** с включённым **MQTT**.
 - **Telegram-бот** (создать у [@BotFather](https://t.me/BotFather)) и ID чата.
 - **Python 3.9+**, Linux с systemd (для автозапуска).
+
+## Настройка Frigate (обязательно)
+
+Скрипт ничего не «видит» сам — он берёт события и медиа у Frigate. Чтобы уведомления
+приходили с **фото и видео**, во Frigate должны быть включены **три** вещи:
+
+| Что | Зачем | Без этого |
+|---|---|---|
+| **MQTT** | через него скрипт узнаёт о событиях (`frigate/events`) | уведомлений не будет вообще |
+| **Snapshots** | даёт фото события (`has_snapshot`) | не будет фото |
+| **Record (записи)** | даёт видео-клип события (`has_clip`) | не будет видео |
+
+Плюс объекты в `objects.track` должны пересекаться с `OBJECTS` из `config.py`, а зоны
+(если хочешь фильтр `zones`) — заданы у камер.
+
+### Минимальный пример `config.yml` Frigate (версия 0.14+)
+```yaml
+mqtt:
+  enabled: true
+  host: 192.168.1.50          # тот же адрес/логин/пароль пойдёт в MQTT_* в config.py
+  user: frigate
+  password: секрет
+
+detectors:
+  # твой детектор — coral / cpu / openvino и т.д.
+  cpu1:
+    type: cpu
+
+objects:
+  track:
+    - person
+    - car                     # должно пересекаться с OBJECTS в config.py
+
+# Фото событий — нужно для фото в уведомлении
+snapshots:
+  enabled: true
+  retain:
+    default: 14               # дней хранить снимки
+
+# Записи — нужно для видео-клипа в уведомлении (Frigate 0.14+)
+record:
+  enabled: true
+  alerts:
+    retain:
+      days: 14
+  detections:
+    retain:
+      days: 14
+
+cameras:
+  dvor:                       # ← это имя пойдёт в "cameras": [...] в config.py
+    ffmpeg:
+      inputs:
+        - path: rtsp://ЛОГИН:ПАРОЛЬ@IP_КАМЕРЫ:554/stream
+          roles: [detect, record]
+    detect:
+      enabled: true
+    zones:                    # опционально — для фильтра "zones" в config.py
+      zone_dvor:              # ← это имя пойдёт в "zones": [...] в config.py
+        coordinates: 0.1,0.9,0.9,0.9,0.9,0.1,0.1,0.1
+```
+
+`snapshots` и `record` можно задавать глобально (как выше) или отдельно у каждой камеры.
+
+> **Версии Frigate.** Пример — для 0.14+, где хранение записей задаётся в
+> `record.alerts` / `record.detections`. В старой 0.13 это было `record.events.retain`.
+> Официальная документация: [snapshots](https://docs.frigate.video/configuration/snapshots),
+> [record](https://docs.frigate.video/configuration/record),
+> [objects](https://docs.frigate.video/configuration/objects),
+> [zones](https://docs.frigate.video/configuration/zones).
+
+### Проверка, что всё готово
+После правки конфига **перезапусти Frigate**. У завершённого события должны быть
+`has_snapshot: true` и `has_clip: true` — это видно в UI Frigate (Explore) или через API:
+```bash
+curl http://IP_FRIGATE:5000/api/events | python3 -m json.tool | grep -E "has_snapshot|has_clip"
+```
+Если `has_clip` всегда `false` — не включён/не хранится `record`; если `has_snapshot`
+`false` — не включён `snapshots`.
 
 ## Установка
 ```bash
