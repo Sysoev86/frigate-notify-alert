@@ -78,6 +78,7 @@ record:
   alerts:
     retain:
       days: 14
+      # mode: active_objects   # опционально: active_objects | motion | all
   detections:
     retain:
       days: 14
@@ -95,10 +96,15 @@ cameras:
         coordinates: 0.1,0.9,0.9,0.9,0.9,0.1,0.1,0.1
 ```
 
-`snapshots` и `record` можно задавать глобально (как выше) или отдельно у каждой камеры.
+`snapshots`, `record` и `objects.track` можно задавать **глобально** (как выше) **или
+отдельно у каждой камеры** — важно не «где написано», а **итоговое (эффективное)**
+значение у камеры. Рабочий пример: `snapshots` глобально `false`, но включены у нужных
+камер — этого достаточно, фото приходят. То же с `objects.track`: можно глобально
+`[person]`, а на отдельной камере расширить до `[person, car]`.
 
-> **Версии Frigate.** Пример — для 0.14+, где хранение записей задаётся в
-> `record.alerts` / `record.detections`. В старой 0.13 это было `record.events.retain`.
+> **Версии Frigate.** Пример — для 0.14+ (проверено на **0.17**), где хранение записей
+> задаётся в `record.alerts` / `record.detections` (поле `mode` необязательное). В старой
+> 0.13 это было `record.events.retain`.
 > Официальная документация: [snapshots](https://docs.frigate.video/configuration/snapshots),
 > [record](https://docs.frigate.video/configuration/record),
 > [objects](https://docs.frigate.video/configuration/objects),
