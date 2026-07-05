@@ -3,6 +3,12 @@
 All notable changes. Format follows [Semantic Versioning](https://semver.org/):
 `MAJOR.MINOR.PATCH`.
 
+## [1.1.1] — 2026-07-05
+### Added
+- **Diagnostic logging** per event: source (`mqtt` / `api-poll` / `api-retry`), event
+  `duration`, time `since_end` before sending, and downloaded clip size in MB. Helps spot
+  a clip that arrives shorter than the event (Frigate still finalizing the recording).
+
 ## [1.1.0] — 2026-07-05
 ### Added
 - **English is now the primary language.** English `README.md`, `config.example.py`

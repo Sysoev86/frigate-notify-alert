@@ -301,7 +301,7 @@ class FrigateTelegramMonitor:
                             self.logger.info(f"🔄 Обработка завершенного события {event_id} для камеры {camera}")
                             
                             # Обрабатываем событие
-                            await self._process_frigate_event(event)
+                            await self._process_frigate_event(event, source="api-poll")
                             
                             # Помечаем как обработанное
                             self.processed_events.add(event_id)
@@ -339,7 +339,7 @@ class FrigateTelegramMonitor:
                                                         f"✅ Событие {retry_event_id} найдено по прямому URL и готово к обработке "
                                                         f"(snapshot: {has_snapshot}, clip: {has_clip}, попытка {retry_count + 1})"
                                                     )
-                                                    await self._process_frigate_event(updated_event)
+                                                    await self._process_frigate_event(updated_event, source="api-retry")
                                                     del self.retry_events[retry_event_id]
                                                 else:
                                                     # Обновляем событие в очереди
@@ -398,8 +398,8 @@ class FrigateTelegramMonitor:
         except Exception as e:
             self.logger.error(f"❌ Ошибка проверки событий Frigate: {e}")
     
-    async def _process_frigate_event(self, event: Dict[str, Any]):
-        """Обработка события из Frigate API"""
+    async def _process_frigate_event(self, event: Dict[str, Any], source: str = "?"):
+        """Обработка события из Frigate API. source — откуда пришло (mqtt/api-poll/api-retry)."""
         try:
             event_id = event.get("id")
             camera = event.get("camera")
@@ -413,10 +413,22 @@ class FrigateTelegramMonitor:
                 )
                 return
 
+            # Диагностика: длительность события и сколько прошло от его конца до отправки.
+            # Если clip приходит короче duration — значит Frigate ещё дописывал запись.
+            start_time = event.get("start_time")
+            end_time = event.get("end_time")
+            duration = round(end_time - start_time, 1) if (start_time and end_time) else "?"
+            since_end = round(time.time() - end_time, 1) if end_time else "?"
+            self.logger.info(
+                f"🎬 Event {event_id}: {object_type}@{camera} | source={source} | "
+                f"duration={duration}s | since_end={since_end}s | "
+                f"snapshot={event.get('has_snapshot')} clip={event.get('has_clip')}"
+            )
+
             # Формируем URL для медиа
             photo_url = f"{FRIGATE_URL}/api/events/{event_id}/snapshot.jpg?crop=1"
             video_url = f"{FRIGATE_URL}/api/events/{event_id}/clip.mp4"
-            
+
             self.logger.info(f"🔗 Snapshot URL: {photo_url}")
             self.logger.info(f"🔗 Clip URL: {video_url}")
             
@@ -519,7 +531,10 @@ class FrigateTelegramMonitor:
                 async with session.get(video_url, timeout=aiohttp.ClientTimeout(total=90)) as response:
                     if response.status == 200:
                         video_data = await response.read()
-                        self.logger.info(f"🎥 Видео загружено: {len(video_data)} байт")
+                        self.logger.info(
+                            f"🎥 Clip downloaded: {len(video_data)} bytes "
+                            f"({len(video_data)/1024/1024:.2f} MB)"
+                        )
                     else:
                         self.logger.error(f"❌ Ошибка загрузки видео: HTTP {response.status}")
                         return False
@@ -715,7 +730,7 @@ class FrigateTelegramMonitor:
                             f"✅ Событие {event_id} готово к обработке "
                             f"(snapshot: {has_snapshot}, clip: {has_clip})"
                         )
-                        await self._process_frigate_event(full_event)
+                        await self._process_frigate_event(full_event, source="mqtt")
                     else:
                         # Добавляем в очередь повторной проверки
                         self.retry_events[event_id] = (full_event, 0)
