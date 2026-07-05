@@ -259,7 +259,7 @@ applies only to the group whose chat the button was tapped in.
 
 ## Management
 Run from the project folder: `./manage.sh <command>`. Commands that change systemd
-(`install`/`start`/`stop`/`restart`/`enable`/`disable`/`update`/`migrate`) need `sudo`.
+(`install`/`start`/`stop`/`restart`/`enable`/`disable`/`update`) need `sudo`.
 
 | Command | What it does |
 |---|---|
@@ -270,7 +270,6 @@ Run from the project folder: `./manage.sh <command>`. Commands that change syste
 | `enable` / `disable` | Toggle autostart on boot (usually already done by `install`). |
 | `update` | Update to the latest version (git pull + reinstall + restart). |
 | `version` | Show local version and the latest tag. |
-| `migrate` | One‑time migration from the old per‑group units to the templated ones. |
 
 ## How it works
 The script gets events in real time from the MQTT topic `frigate/events` (with `/api/events`

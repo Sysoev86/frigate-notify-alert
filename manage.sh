@@ -82,19 +82,6 @@ case "${1:-}" in
         echo "✅ Установлено и включено для групп: $GROUPS_LIST (+ пульт)"
         echo "   Дальше: ./manage.sh start"
         ;;
-    migrate)
-        # Переезд со старых по-групповых юнитов (frigate-telegram-group1/2) на шаблон
-        echo "🔄 Миграция на шаблонные юниты..."
-        for old in frigate-telegram-group1 frigate-telegram-group2 frigate-telegram; do
-            systemctl stop "$old" 2>/dev/null || true
-            systemctl disable "$old" 2>/dev/null || true
-            rm -f "/etc/systemd/system/${old}.service"
-        done
-        systemctl daemon-reload
-        "$0" install
-        "$0" start
-        echo "✅ Миграция завершена"
-        ;;
     version)
         v="$(cat VERSION 2>/dev/null || echo '?')"
         echo "📌 Локальная версия: $v"
@@ -117,14 +104,13 @@ case "${1:-}" in
     *)
         echo "🔧 Управление Frigate → Telegram (frigate-notify-alert)"
         echo ""
-        echo "Использование: $0 {install|start|stop|restart|status|logs|enable|disable|migrate|update|version}"
+        echo "Использование: $0 {install|start|stop|restart|status|logs|enable|disable|update|version}"
         echo ""
         echo "Группы (из config.py): $GROUPS_LIST"
         echo ""
         echo "  install  - поставить юниты и включить автозапуск (читает группы из config.py)"
         echo "  update   - git pull + переустановка юнитов + рестарт (обновиться до последней версии)"
         echo "  version  - показать локальную версию и последний тег в origin"
-        echo "  migrate  - перейти со старых frigate-telegram-group1/2 на шаблонные юниты"
         echo "  start    - запустить все группы + пульт паузы"
         echo "  stop     - остановить всё"
         echo "  restart  - перезапустить всё"

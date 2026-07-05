@@ -283,7 +283,7 @@ sudo ./manage.sh update    # git pull + переустановка юнитов 
 
 ## Управление
 Все команды запускаются из папки проекта: `./manage.sh <команда>`. Команды, что
-меняют systemd (`install`/`start`/`stop`/`restart`/`enable`/`disable`/`update`/`migrate`),
+меняют systemd (`install`/`start`/`stop`/`restart`/`enable`/`disable`/`update`),
 требуют `sudo`.
 
 | Команда | Что делает | Когда нужна |
@@ -298,7 +298,6 @@ sudo ./manage.sh update    # git pull + переустановка юнитов 
 | `disable` | Выключает автозапуск при загрузке (текущий запуск не трогает). | Временно убрать из автозагрузки, не удаляя. |
 | `update` | Обновление до последней версии: `git pull` → переустановка юнитов → рестарт. `config.py` не трогается. | Чтобы подтянуть свежую версию из GitHub. |
 | `version` | Печатает локальную версию (`VERSION`) и последний тег в GitHub. | Узнать свою версию / есть ли новее. |
-| `migrate` | Разовый переход со старой схемы (отдельные юниты `frigate-telegram-group1/2`) на шаблонные `frigate-telegram@`. | Только при апгрейде со старой установки. |
 
 Типовой первый запуск: `sudo ./manage.sh install && sudo ./manage.sh start`.
 Обновиться позже: `sudo ./manage.sh update`.
