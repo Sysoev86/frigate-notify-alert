@@ -10,7 +10,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-APPDIR="$(pwd)"                 # real install path — substituted into the units
+APPDIR="$(pwd)"                 # real install path — baked into generated units
 SERVICE_CONTROL="frigate-telegram-control"
 UNIT_TPL="frigate-telegram@"   # templated unit, instance = group name
 
@@ -18,6 +18,26 @@ if [ ! -f config.py ]; then
     echo "❌ config.py not found. First: cp config.example.py config.py (then edit it)"
     exit 1
 fi
+
+command -v python3 >/dev/null 2>&1 || {
+    echo "❌ python3 not found. Install it with your package manager (e.g. apt install python3)."
+    exit 1
+}
+
+# systemd commands need systemctl + root; on systems without systemd use './manage.sh run'
+need_systemd() {
+    command -v systemctl >/dev/null 2>&1 || {
+        echo "❌ systemd (systemctl) not found on this system."
+        echo "   You can still run the monitor manually: $0 run <group>"
+        exit 1
+    }
+}
+need_root() {
+    [ "$(id -u)" -eq 0 ] || {
+        echo "❌ This command needs root: sudo $0 ${1:-}"
+        exit 1
+    }
+}
 
 # Group list from config.py (config.py is plain python with no dependencies)
 get_groups() {
@@ -31,16 +51,59 @@ GROUPS_LIST="$(get_groups)"
 install_deps() {
     if [ ! -d venv ]; then
         echo "📦 Creating virtual environment..."
-        python3 -m venv venv
+        python3 -m venv venv || {
+            echo "❌ Could not create a venv. On Debian/Ubuntu install it first:"
+            echo "   sudo apt install python3-venv"
+            exit 1
+        }
     fi
     echo "📥 Installing requirements..."
     ./venv/bin/pip install -q --upgrade pip
     ./venv/bin/pip install -q -r requirements.txt
 }
 
+# systemd units are generated here (no separate .service files to maintain);
+# $APPDIR is baked in at install time, %i is the group name from config.py
+write_units() {
+    cat > "/etc/systemd/system/${UNIT_TPL}.service" <<EOF
+[Unit]
+Description=Frigate Telegram Monitor - group %i
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=$APPDIR
+ExecStart=$APPDIR/venv/bin/python $APPDIR/frigate_telegram_monitor.py %i
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    cat > "/etc/systemd/system/${SERVICE_CONTROL}.service" <<EOF
+[Unit]
+Description=Frigate Telegram Monitor - Mute Controller (pause buttons)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=$APPDIR
+ExecStart=$APPDIR/venv/bin/python $APPDIR/mute_controller.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
 case "${1:-}" in
     setup)
         # Full first-time setup: dependencies + systemd units + start
+        need_systemd; need_root setup
         echo "🚀 Setting up frigate-notify-alert in $APPDIR"
         install_deps
         "$0" install
@@ -67,24 +130,28 @@ case "${1:-}" in
         exec ./venv/bin/python frigate_telegram_monitor.py "$GROUP"
         ;;
     start)
+        need_systemd; need_root start
         echo "🚀 Starting: groups [$GROUPS_LIST] + pause controller"
         for g in $GROUPS_LIST; do systemctl start "${UNIT_TPL}${g}"; done
         systemctl start "$SERVICE_CONTROL"
         echo "✅ Started"
         ;;
     stop)
+        need_systemd; need_root stop
         echo "🛑 Stopping all services"
         for g in $GROUPS_LIST; do systemctl stop "${UNIT_TPL}${g}" || true; done
         systemctl stop "$SERVICE_CONTROL" || true
         echo "✅ Stopped"
         ;;
     restart)
+        need_systemd; need_root restart
         echo "🔄 Restarting all services"
         for g in $GROUPS_LIST; do systemctl restart "${UNIT_TPL}${g}"; done
         systemctl restart "$SERVICE_CONTROL"
         echo "✅ Restarted"
         ;;
     status)
+        need_systemd
         for g in $GROUPS_LIST; do
             echo "=== $g ==="
             systemctl status "${UNIT_TPL}${g}" --no-pager || true
@@ -94,27 +161,29 @@ case "${1:-}" in
         systemctl status "$SERVICE_CONTROL" --no-pager || true
         ;;
     logs)
+        need_systemd
         echo "📋 Live logs for all groups + controller (Ctrl+C to exit)"
         # -u accepts glob patterns, so this catches every instance at once
         journalctl -f -u "${UNIT_TPL}*" -u "$SERVICE_CONTROL"
         ;;
     enable)
+        need_systemd; need_root enable
         echo "⚙️ Enabling autostart for groups [$GROUPS_LIST] + controller"
         for g in $GROUPS_LIST; do systemctl enable "${UNIT_TPL}${g}"; done
         systemctl enable "$SERVICE_CONTROL"
         echo "✅ Autostart enabled"
         ;;
     disable)
+        need_systemd; need_root disable
         echo "❌ Disabling autostart"
         for g in $GROUPS_LIST; do systemctl disable "${UNIT_TPL}${g}" || true; done
         systemctl disable "$SERVICE_CONTROL" || true
         echo "✅ Autostart disabled"
         ;;
     install)
+        need_systemd; need_root install
         echo "📦 Installing units (group template + controller), path: $APPDIR"
-        # Substitute the real install path for the __APPDIR__ placeholder
-        sed "s#__APPDIR__#${APPDIR}#g" "${UNIT_TPL}.service"     > "/etc/systemd/system/${UNIT_TPL}.service"
-        sed "s#__APPDIR__#${APPDIR}#g" "${SERVICE_CONTROL}.service" > "/etc/systemd/system/${SERVICE_CONTROL}.service"
+        write_units
         systemctl daemon-reload
         for g in $GROUPS_LIST; do systemctl enable "${UNIT_TPL}${g}"; done
         systemctl enable "$SERVICE_CONTROL"
@@ -132,6 +201,7 @@ case "${1:-}" in
         fi
         ;;
     update)
+        need_systemd; need_root update
         echo "⬇️  Updating to the latest version..."
         git pull --ff-only origin main || { echo "❌ git pull failed"; exit 1; }
         echo "🔧 Reinstalling units and restarting..."
