@@ -5,6 +5,19 @@
 All notable changes. Format follows [Semantic Versioning](https://semver.org/):
 `MAJOR.MINOR.PATCH`.
 
+## [1.3.3] — 2026-07-06
+### Fixed
+- **Stale pinned pause status.** The pinned "🔕 paused until X" was only refreshed by a
+  button press, so an expired pause left it pinned forever. An expiry watcher now flips
+  the panel back within ~a minute. (Notifications themselves always resumed on time —
+  the monitor checks expiry on its own.)
+
+### Changed
+- **State-aware control panel.** No more permanent "▶️ Resume" button while notifications
+  are on: the keyboard shows pause buttons only, and gains Resume + extend options while
+  paused. One panel message replaces the old keyboard + status pair; pinned only during
+  a pause. Legacy messages are cleaned up automatically on update.
+
 ## [1.3.2] — 2026-07-05
 ### Added
 - **`manage.sh doctor`** — one-command self-diagnosis of the whole chain: config

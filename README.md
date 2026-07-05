@@ -249,10 +249,12 @@ the group list straight from `config.py`. To add a group: put it into `GROUPS`, 
 The pause controller picks up new groups automatically.
 
 ## Pause notifications
-The `frigate-telegram-control` service (`mute_controller.py`) keeps a keyboard at the
-bottom of each chat: `⏸ 15 min | 1 h | 3 h | Until morning | ▶️ Resume`. Tap it and that
-group's notifications go silent until the pause ends (it survives restarts). The pause
-applies only to the group whose chat the button was tapped in.
+The `frigate-telegram-control` service (`mute_controller.py`) keeps a **state-aware control
+panel** in each chat. While notifications are on, the keyboard shows pause buttons only
+(`⏸ 15 min / 1 h / 3 h / until morning`); while paused, the panel says "🔕 paused until X"
+(pinned) and adds a `▶️ Resume` button plus extend options. When the pause expires, the
+panel flips back automatically within a minute. The pause applies only to the group whose
+chat the button was tapped in and survives restarts.
 
 - Toggled per group via `mute_controls` (on by default); button language — via `LANG`.
 - To let the bot pin the status and clean up taps, make it a chat **admin** (optional).
