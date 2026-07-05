@@ -47,7 +47,11 @@ class FrigateTelegramMonitor:
         """Инициализация монитора для указанной группы"""
         self.group_id = group_id
         self.group_config = GROUPS[group_id]
-        
+
+        # Момент запуска: события, завершившиеся ДО него, не шлём (иначе при старте
+        # улетает вся история из /api/events, т.к. список обработанных ещё пуст).
+        self.startup_ts = time.time()
+
         # Настройка логирования
         self.logger = self._setup_logging()
         
@@ -189,6 +193,7 @@ class FrigateTelegramMonitor:
                         skipped_wrong_camera = 0
                         skipped_wrong_object = 0
                         skipped_wrong_zone = 0
+                        skipped_old = 0
                         skipped_no_snapshot = 0
                         skipped_no_clip = 0
                         already_processed = 0
@@ -231,6 +236,18 @@ class FrigateTelegramMonitor:
                                 self.logger.debug(
                                     f"⏭️ Пропуск события {event_id} ({object_type} на {camera}): "
                                     f"объект '{object_type}' не в списке отслеживаемых"
+                                )
+                                continue
+
+                            # Событие завершилось ДО запуска скрипта — это «история» из API,
+                            # не шлём (иначе при каждом старте улетает бэклог за последний час).
+                            # Помечаем обработанным, чтобы больше не рассматривать.
+                            if end_time < self.startup_ts:
+                                self.processed_events.add(event_id)
+                                skipped_old += 1
+                                self.logger.debug(
+                                    f"⏭️ Пропуск старого события {event_id} ({object_type} на {camera}): "
+                                    f"завершилось до запуска (end_time={end_time} < старт={self.startup_ts:.0f})"
                                 )
                                 continue
 
@@ -362,7 +379,7 @@ class FrigateTelegramMonitor:
                             del self.retry_events[retry_event_id]
                         
                         # Логируем статистику
-                        if new_events > 0 or skipped_no_end_time > 0 or skipped_wrong_camera > 0 or skipped_wrong_object > 0 or skipped_wrong_zone > 0 or skipped_no_snapshot > 0 or skipped_no_clip > 0 or already_processed > 0 or len(self.retry_events) > 0:
+                        if new_events > 0 or skipped_no_end_time > 0 or skipped_wrong_camera > 0 or skipped_wrong_object > 0 or skipped_wrong_zone > 0 or skipped_old > 0 or skipped_no_snapshot > 0 or skipped_no_clip > 0 or already_processed > 0 or len(self.retry_events) > 0:
                             self.logger.info(
                                 f"📊 Статистика: "
                                 f"новых обработано={new_events}, "
@@ -371,6 +388,7 @@ class FrigateTelegramMonitor:
                                 f"другая камера={skipped_wrong_camera}, "
                                 f"другой объект={skipped_wrong_object}, "
                                 f"другая зона={skipped_wrong_zone}, "
+                                f"старое (до старта)={skipped_old}, "
                                 f"нет snapshot={skipped_no_snapshot}, "
                                 f"нет clip={skipped_no_clip}, "
                                 f"в памяти ID={len(self.processed_events)}, "
