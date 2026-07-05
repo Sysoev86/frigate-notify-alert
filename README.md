@@ -292,6 +292,14 @@ taps and writes `mute_state.json`, which the monitors read before sending.
 - `config.py not found` → run `cp config.example.py config.py`.
 - Telegram unreachable (timeouts / `Flood control`) → check network/proxy; set
   `TELEGRAM_PROXY_URL` if Telegram is blocked.
+- **One camera sends photos but never video** (event has `has_snapshot: true`,
+  `has_clip: false`) → in Frigate this camera's clips aren't retained. A common cause is
+  `record.<alerts|detections>.retain.mode: motion` **combined with a motion mask** covering
+  the area where objects move: object detection still fires (so the snapshot arrives), but
+  Frigate sees "no motion" there, so those recording segments aren't kept and the event
+  never gets a clip. **Fix:** use `mode: active_objects` (retain segments that contain a
+  tracked object, independent of motion masks). Then `has_clip` becomes `true` and video
+  flows. Note `record` is usually global, so this affects every masked camera.
 
 ## Versioning
 [Semantic Versioning](https://semver.org/). Changes are in [CHANGELOG.md](CHANGELOG.md),

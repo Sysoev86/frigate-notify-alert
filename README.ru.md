@@ -314,6 +314,14 @@ sudo ./manage.sh update    # git pull + переустановка юнитов 
 - `❌ Не найден config.py` → сделай `cp config.example.py config.py`.
 - Telegram не доступен (таймауты/`Flood control`) → проверь сеть/прокси; при блокировке
   укажи `TELEGRAM_PROXY_URL`.
+- **Одна камера шлёт только фото, видео нет** (у события `has_snapshot: true`,
+  `has_clip: false`) → у этой камеры Frigate не удерживает клипы. Частая причина —
+  `record.<alerts|detections>.retain.mode: motion` **вместе с маской движения** над зоной,
+  где ездят/ходят объекты: детекция срабатывает (снимок приходит), но «движения» там
+  Frigate не видит → сегменты записи не хранятся → у события нет клипа. **Фикс:**
+  `mode: active_objects` (хранит сегменты с трекнутым объектом, маски движения не мешают).
+  После этого `has_clip` становится `true` и видео идёт. `record` обычно глобальный,
+  так что это касается всех камер с масками.
 
 ## Версии
 [Semantic Versioning](https://semver.org/lang/ru/). Изменения — в [CHANGELOG.md](CHANGELOG.md),
