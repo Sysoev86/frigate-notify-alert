@@ -3,6 +3,21 @@
 All notable changes. Format follows [Semantic Versioning](https://semver.org/):
 `MAJOR.MINOR.PATCH`.
 
+## [1.3.0] — 2026-07-05
+### Changed
+- **One script instead of four.** `manage.sh` gained `setup` (first-time install:
+  dependencies + units + start) and `run [group]` (manual foreground run).
+  `install_deps.sh`, `run_monitor.sh` and `server_setup.sh` are removed — fresh install
+  is now just `cp config.example.py config.py`, edit, `sudo ./manage.sh setup`.
+- Shell scripts and systemd units translated to English.
+
+### Fixed
+- Manual run never passed a group id to the monitor (it exited with usage);
+  `manage.sh run` picks the group automatically when there is exactly one.
+
+### Removed
+- One-off `migrate` command (legacy pre-templated units, no longer needed).
+
 ## [1.2.0] — 2026-07-05
 Code cleanup release. Default behavior is unchanged.
 

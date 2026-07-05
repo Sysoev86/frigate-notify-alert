@@ -131,12 +131,9 @@ cd frigate-notify-alert
 cp config.example.py config.py     # your config (gitignored, never committed)
 nano config.py                     # fill it in (see details below)
 
-./install_deps.sh                  # venv + dependencies
-sudo ./manage.sh install           # install units (one per group from config.py) + pause controller
-sudo ./manage.sh start
-./manage.sh status
+sudo ./manage.sh setup             # dependencies + systemd units (one per group) + start
 ```
-Manual run without systemd: `./run_monitor.sh`. Check version: `./manage.sh version`.
+Manual run without systemd: `./manage.sh run [group]`. Check version: `./manage.sh version`.
 
 ## Configuration (`config.py`) in detail
 
@@ -258,12 +255,15 @@ applies only to the group whose chat the button was tapped in.
 - To let the bot pin the status and clean up taps, make it a chat **admin** (optional).
 
 ## Management
-Run from the project folder: `./manage.sh <command>`. Commands that change systemd
-(`install`/`start`/`stop`/`restart`/`enable`/`disable`/`update`) need `sudo`.
+One script for everything — run from the project folder: `./manage.sh <command>`.
+Commands that touch systemd (`setup`/`install`/`start`/`stop`/`restart`/`enable`/`disable`/`update`)
+need `sudo`.
 
 | Command | What it does |
 |---|---|
-| `install` | Installs systemd units (one per group from `config.py`) + the pause controller, enables autostart. Does **not** start them — run `start` next. |
+| `setup` | First-time install: dependencies + systemd units + start. The only command a fresh install needs. |
+| `run [group]` | Manual foreground run without systemd (auto-picks the group if there's only one). |
+| `install` | (Re)installs systemd units (one per group from `config.py`), enables autostart. |
 | `start` / `stop` / `restart` | Control all services. Use `restart` after editing `config.py`. |
 | `status` | Status of each group + the controller. |
 | `logs` | Live logs of all groups + the controller (`Ctrl+C` to exit). |

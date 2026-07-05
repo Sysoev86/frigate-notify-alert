@@ -14,6 +14,11 @@ APPDIR="$(pwd)"                 # real install path — substituted into the uni
 SERVICE_CONTROL="frigate-telegram-control"
 UNIT_TPL="frigate-telegram@"   # templated unit, instance = group name
 
+if [ ! -f config.py ]; then
+    echo "❌ config.py not found. First: cp config.example.py config.py (then edit it)"
+    exit 1
+fi
+
 # Group list from config.py (config.py is plain python with no dependencies)
 get_groups() {
     python3 -c "from config import GROUPS; print(' '.join(GROUPS))" 2>/dev/null || {
@@ -22,7 +27,45 @@ get_groups() {
 
 GROUPS_LIST="$(get_groups)"
 
+# venv + dependencies (idempotent, quiet when already installed)
+install_deps() {
+    if [ ! -d venv ]; then
+        echo "📦 Creating virtual environment..."
+        python3 -m venv venv
+    fi
+    echo "📥 Installing requirements..."
+    ./venv/bin/pip install -q --upgrade pip
+    ./venv/bin/pip install -q -r requirements.txt
+}
+
 case "${1:-}" in
+    setup)
+        # Full first-time setup: dependencies + systemd units + start
+        echo "🚀 Setting up frigate-notify-alert in $APPDIR"
+        install_deps
+        "$0" install
+        "$0" start
+        "$0" status
+        echo ""
+        echo "✅ Setup complete. Manage with: ./manage.sh {start|stop|restart|status|logs|update}"
+        ;;
+    run)
+        # Manual foreground run without systemd: ./manage.sh run [group]
+        GROUP="${2:-}"
+        if [ -z "$GROUP" ]; then
+            set -- $GROUPS_LIST
+            if [ "$#" -eq 1 ]; then
+                GROUP="$1"
+            else
+                echo "Usage: $0 run <group>"
+                echo "Available groups: $GROUPS_LIST"
+                exit 1
+            fi
+        fi
+        install_deps
+        echo "🎯 Starting monitor for group: $GROUP (Ctrl+C to stop)"
+        exec ./venv/bin/python frigate_telegram_monitor.py "$GROUP"
+        ;;
     start)
         echo "🚀 Starting: groups [$GROUPS_LIST] + pause controller"
         for g in $GROUPS_LIST; do systemctl start "${UNIT_TPL}${g}"; done
@@ -100,10 +143,12 @@ case "${1:-}" in
     *)
         echo "🔧 frigate-notify-alert service management"
         echo ""
-        echo "Usage: $0 {install|start|stop|restart|status|logs|enable|disable|update|version}"
+        echo "Usage: $0 {setup|run|install|start|stop|restart|status|logs|enable|disable|update|version}"
         echo ""
         echo "Groups (from config.py): $GROUPS_LIST"
         echo ""
+        echo "  setup    - first-time install: dependencies + systemd units + start (sudo)"
+        echo "  run      - manual foreground run without systemd: $0 run [group]"
         echo "  install  - install units and enable autostart (reads groups from config.py)"
         echo "  update   - git pull + reinstall units + restart (get the latest version)"
         echo "  version  - show local version and the latest tag on origin"
