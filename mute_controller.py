@@ -234,6 +234,10 @@ class MuteController:
         if not muted:
             if sid:
                 try:
+                    await self.bot.unpin_chat_message(chat_id=int(chat_id), message_id=sid)
+                except TelegramError:
+                    pass
+                try:
                     await self.bot.delete_message(chat_id=int(chat_id), message_id=sid)
                 except TelegramError:
                     pass
@@ -291,6 +295,19 @@ class MuteController:
         except TelegramError:
             pass
 
+    async def _expire_stale_statuses(self):
+        """Remove the pinned pause status once the pause has expired — without
+        waiting for a button press. Runs on every loop tick (~50 s), so the pin
+        disappears within a minute of the pause ending."""
+        for chat_id, (group_id, _) in self.chat_to_group.items():
+            entry = self.status.get(chat_id) or {}
+            if not entry.get("status"):
+                continue  # nothing pinned for this chat
+            until = self._muted_until(group_id)
+            if not until or until <= time.time():
+                log.info(f"⏰ {group_id}: pause expired — removing the pinned status")
+                await self._refresh_status(chat_id)
+
     async def run(self):
         log.info(f"🚀 Mute Controller started. Chats: {list(self.chat_to_group.keys())}")
         # On start: remove controls from disabled groups...
@@ -311,6 +328,11 @@ class MuteController:
                 log.warning(f"⚠️ getUpdates: {e}")
                 await asyncio.sleep(5)
                 continue
+
+            try:
+                await self._expire_stale_statuses()
+            except Exception as e:
+                log.warning(f"⚠️ expire check: {e}")
 
             for u in updates:
                 offset = u.update_id + 1
