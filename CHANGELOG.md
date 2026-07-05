@@ -1,5 +1,7 @@
 # Changelog
 
+**🇷🇺 Русская версия:** [CHANGELOG.ru.md](CHANGELOG.ru.md)
+
 All notable changes. Format follows [Semantic Versioning](https://semver.org/):
 `MAJOR.MINOR.PATCH`.
 

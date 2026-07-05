@@ -323,7 +323,7 @@ sudo ./manage.sh update    # git pull + переустановка юнитов 
   так что это касается всех камер с масками.
 
 ## Версии
-[Semantic Versioning](https://semver.org/lang/ru/). Изменения — в [CHANGELOG.md](CHANGELOG.md),
+[Semantic Versioning](https://semver.org/lang/ru/). Изменения — в [CHANGELOG.ru.md](CHANGELOG.ru.md),
 релизы — на вкладке [Releases](https://github.com/Sysoev86/frigate-notify-alert/releases).
 
 ## Лицензия
