@@ -82,10 +82,11 @@ record:
   alerts:
     retain:
       days: 14
-      # mode: active_objects   # опционально: active_objects | motion | all
+      mode: active_objects    # рекомендуем — см. заметку ниже
   detections:
     retain:
       days: 14
+      mode: active_objects
 
 cameras:
   dvor:                       # ← это имя пойдёт в "cameras": [...] в config.py
@@ -106,8 +107,13 @@ cameras:
 камер — этого достаточно, фото приходят. То же с `objects.track`: можно глобально
 `[person]`, а на отдельной камере расширить до `[person, car]`.
 
+> **Почему `mode: active_objects`?** При `mode: motion` маска движения над зоной, где
+> ходят/ездят объекты, заставляет Frigate молча выбрасывать эти сегменты записи — у события
+> есть снимок, но нет клипа (`has_clip: false`). `active_objects` хранит сегменты по самому
+> трекнутому объекту, и маски движения клипы не ломают. См. [Диагностику](#диагностика).
+
 > **Версии Frigate.** Пример — для 0.14+ (проверено на **0.17**), где хранение записей
-> задаётся в `record.alerts` / `record.detections` (поле `mode` необязательное). В старой
+> задаётся в `record.alerts` / `record.detections`. В старой
 > 0.13 это было `record.events.retain`.
 > Официальная документация: [snapshots](https://docs.frigate.video/configuration/snapshots),
 > [record](https://docs.frigate.video/configuration/record),
@@ -182,11 +188,12 @@ FRIGATE_URL = "http://192.168.1.50:5000"
 OBJECTS = ["person", "car", "truck", "bus", "motorcycle", "bicycle"]
 
 # 6. ПРОЧЕЕ (обычно менять не нужно) ---------------------------------------
+LANG = "ru"                          # язык пульта паузы: "en" или "ru"
 LOG_LEVEL = "INFO"
 LOG_FORMAT = "%(asctime)s - %(levelname)s - %(message)s"
 STATS_INTERVAL = 60
-MEDIA_WAIT_TIME = 25
 MEDIA_RETRY_ATTEMPTS = 15
+MEDIA_RETRY_DELAY = 3
 ```
 
 ### Разбор по полям
@@ -207,6 +214,7 @@ MEDIA_RETRY_ATTEMPTS = 15
 | `telegram_chat_id` | да | Куда слать. Для групп/каналов начинается с `-100…`. См. «как узнать» ниже. |
 | `cameras` | да | Список имён камер **ровно как в Frigate** (регистр важен). |
 | `zones` | нет | Список зон Frigate. Задан → шлём только если объект зашёл в одну из зон. Нет ключа / пустой список → шлём по всей камере. |
+| `objects` | нет | Переопределить глобальный `OBJECTS` только для этой группы (напр. `["person"]` для камеры в помещении). |
 | `mute_controls` | нет | `True` (по умолчанию, даже если ключ не писать) → в чате есть кнопки паузы. `False` → без кнопок для этой группы. |
 | `name` | нет | Произвольное название, попадает только в логи. |
 
@@ -248,10 +256,11 @@ cameras:
 | Параметр | По умолч. | Описание |
 |---|---|---|
 | `OBJECTS` | person, car, truck, bus, motorcycle, bicycle | На какие объекты реагировать (имена Frigate). Оставь `["person"]`, если нужны только люди. |
+| `LANG` | `"en"` | Язык кнопок/статуса пульта паузы: `"en"` или `"ru"`. |
 | `LOG_LEVEL` | `"INFO"` | `INFO` или `DEBUG`. |
 | `STATS_INTERVAL` | `60` | Раз в сколько секунд писать статистику в лог. |
-| `MEDIA_WAIT_TIME` | `25` | Сколько секунд ждать готовности медиа. |
 | `MEDIA_RETRY_ATTEMPTS` | `15` | Сколько раз пытаться скачать фото/видео. |
+| `MEDIA_RETRY_DELAY` | `3` | Пауза между попытками скачивания, сек. |
 
 ---
 

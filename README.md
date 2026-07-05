@@ -84,10 +84,11 @@ record:
   alerts:
     retain:
       days: 14
-      # mode: active_objects   # optional: active_objects | motion | all
+      mode: active_objects    # recommended — see the note below
   detections:
     retain:
       days: 14
+      mode: active_objects
 
 cameras:
   yard:                       # ← this name goes into "cameras": [...] in config.py
@@ -106,9 +107,15 @@ cameras:
 per‑camera** — what matters is the **effective** value on the camera (e.g. global
 `snapshots: false` but enabled on specific cameras is enough).
 
+> **Why `mode: active_objects`?** With `mode: motion`, a motion mask covering the area
+> where objects move makes Frigate silently drop those recording segments — events get a
+> snapshot but never a clip (`has_clip: false`). `active_objects` retains segments by the
+> tracked object itself, so motion masks can't break clips. See
+> [Troubleshooting](#troubleshooting).
+
 > **Frigate versions.** The example targets 0.14+ (tested on **0.17**), where recording
-> retention lives under `record.alerts` / `record.detections` (the `mode` field is
-> optional). On older 0.13 it was `record.events.retain`. Docs:
+> retention lives under `record.alerts` / `record.detections`. On older 0.13 it was
+> `record.events.retain`. Docs:
 > [snapshots](https://docs.frigate.video/configuration/snapshots),
 > [record](https://docs.frigate.video/configuration/record),
 > [objects](https://docs.frigate.video/configuration/objects),
@@ -183,8 +190,8 @@ OBJECTS = ["person", "car", "truck", "bus", "motorcycle", "bicycle"]
 LANG = "en"                          # interface language of the pause controller: "en" or "ru"
 LOG_LEVEL = "INFO"
 STATS_INTERVAL = 60
-MEDIA_WAIT_TIME = 25
 MEDIA_RETRY_ATTEMPTS = 15
+MEDIA_RETRY_DELAY = 3
 ```
 
 ### Field reference
@@ -205,6 +212,7 @@ A group = a set of cameras + one chat. You can have any number of groups
 | `telegram_chat_id` | yes | Where to send. For groups/channels it starts with `-100…`. See "how to find" below. |
 | `cameras` | yes | Camera names **exactly as in Frigate** (case‑sensitive). |
 | `zones` | no | Frigate zone names. If set, notify only when the object entered one of these zones. Omit / empty = notify for the whole camera. |
+| `objects` | no | Override the global `OBJECTS` list for this group only (e.g. `["person"]` for an indoor camera). |
 | `mute_controls` | no | `True` (default, even if omitted) → pause buttons appear in the chat. `False` → no buttons for this group. |
 | `name` | no | Free‑form label, only used in logs. |
 
@@ -231,8 +239,8 @@ A group = a set of cameras + one chat. You can have any number of groups
 | `FRIGATE_URL` | — | Frigate web URL where photos/videos are fetched. Usually `http://IP:5000`. |
 | `OBJECTS` | person, car, truck, bus, motorcycle, bicycle | Which objects to react to (Frigate labels). |
 | `LANG` | `"en"` | Pause‑controller interface language: `"en"` or `"ru"`. |
-| `LOG_LEVEL` | `"INFO"` | `INFO` or `DEBUG`. |
-| `STATS_INTERVAL` / `MEDIA_WAIT_TIME` / `MEDIA_RETRY_ATTEMPTS` | 60 / 25 / 15 | Stats interval; how long to wait for media; download retries. |
+| `LOG_LEVEL` | `"INFO"` | `INFO` or `DEBUG` (DEBUG logs every poll cycle in detail). |
+| `STATS_INTERVAL` / `MEDIA_RETRY_ATTEMPTS` / `MEDIA_RETRY_DELAY` | 60 / 15 / 3 | Stats interval (s); media download retries; delay between retries (s). |
 
 ## Updating
 ```bash

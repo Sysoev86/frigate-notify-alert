@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""
-Mute Controller — пульт паузы уведомлений в Telegram.
+"""Mute Controller — in-chat pause buttons for notifications.
 
-Зачем нужен отдельный процесс: у group1/group2 общий токен бота, а принимать
-нажатия кнопок (getUpdates) может только ОДИН потребитель на токен. Поэтому приём
-кнопок вынесен сюда, а мониторы только читают общий файл паузы (mute_state.json).
+Why a separate process: all groups share one bot token, and only ONE consumer
+per token may call getUpdates. So button handling lives here, while the
+monitors just read the shared pause file (mute_state.json).
 
-Что делает:
-  - в каждом чате из GROUPS показывает persistent reply-клавиатуру (всегда внизу):
-        ⏸ 15 мин | ⏸ 1 час | ⏸ 3 часа | ⏸ До утра | ▶️ Включить уведомления
-  - по нажатию ставит/снимает паузу ТОЛЬКО для группы этого чата (пишет muted_until
-    в mute_state.json), правит закреплённое сообщение-статус и удаляет сообщение-нажатие.
+What it does:
+  - keeps a persistent reply keyboard (always at the bottom) in every chat
+    from GROUPS with mute_controls enabled:
+        ⏸ 15 min | ⏸ 1 hour | ⏸ 3 hours | ⏸ Until morning | ▶️ Resume
+  - on a tap, pauses/resumes ONLY that chat's group (writes muted_until into
+    mute_state.json), maintains a pinned status message and deletes the tap.
 """
 
 import asyncio
@@ -21,7 +21,7 @@ import sys
 import time
 from datetime import datetime, timedelta
 
-# --version: печатаем версию и выходим (до тяжёлых импортов и без config.py)
+# --version: print and exit before heavy imports (works without config.py)
 if "--version" in sys.argv:
     _d = os.path.dirname(os.path.abspath(__file__))
     try:
@@ -112,7 +112,7 @@ def _save_json(path: str, data: dict):
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, path)  # атомарная замена, чтобы монитор не прочитал полу-файл
+    os.replace(tmp, path)  # atomic swap so a monitor never reads a half-file
 
 
 def _minutes_until_morning() -> int:
@@ -136,31 +136,31 @@ class MuteController:
         self.bot = Bot(token=TELEGRAM_BOT_TOKEN, request=HTTPXRequest(**request_kw))
 
         # chat_id (str) -> (group_id, group_name).
-        # Пульт паузы показываем только для групп с mute_controls=True (по умолчанию вкл).
-        # Отключённые чаты запоминаем отдельно — чтобы убрать у них клавиатуру.
+        # Controls appear only for groups with mute_controls=True (the default).
+        # Disabled chats are remembered so we can remove their keyboard once.
         self.chat_to_group = {}
         self.disabled_chats = set()
         for gid, cfg in GROUPS.items():
             chat_id = str(cfg["telegram_chat_id"])
             if not cfg.get("mute_controls", True):
-                log.info(f"⏭️ Группа {gid}: пульт паузы отключён (mute_controls=False)")
+                log.info(f"⏭️ Group {gid}: pause controls disabled (mute_controls=False)")
                 self.disabled_chats.add(chat_id)
                 continue
             self.chat_to_group[chat_id] = (gid, cfg.get("name", gid))
 
         if not self.chat_to_group:
-            log.warning("⚠️ Ни в одной группе не включён mute_controls — пульт показывать негде.")
+            log.warning("⚠️ mute_controls is disabled for every group — nowhere to show controls.")
 
-        # chat_id -> {"kb": <id клавиатуры>, "status": <id статуса>}.
-        # Разделяем намеренно: сообщение с reply-клавиатурой Telegram редактировать
-        # НЕ даёт («Message can't be edited»), поэтому клавиатуру шлём один раз
-        # отдельно (она вечно висит внизу), а статус — обычным сообщением, которое
-        # можно править на месте без пересылок и накопления пинов.
+        # chat_id -> {"kb": <keyboard msg id>, "status": <status msg id>}.
+        # Deliberately separate: Telegram refuses to edit a message that carries
+        # a reply keyboard ("Message can't be edited"), so the keyboard is sent
+        # once (it sticks to the bottom forever) and the status is a plain
+        # message we can edit in place — no resends, no piling pins.
         self.status = {}
         for chat_id, entry in _load_json(STATUS_FILE).items():
             if isinstance(entry, dict):
                 self.status[chat_id] = {"kb": entry.get("kb"), "status": entry.get("status")}
-            else:  # старый формат (одно число) — сбрасываем, пересоздадим чисто
+            else:  # legacy format (bare int) — reset, will be recreated cleanly
                 self.status[chat_id] = {"kb": None, "status": None}
 
     def _entry(self, chat_id: str) -> dict:
@@ -175,12 +175,12 @@ class MuteController:
         _save_json(MUTE_STATE_FILE, state)
 
     async def _disable_chat(self, chat_id: str):
-        """Убирает пульт у группы, где mute_controls выключили: снимает статус-пин,
-        удаляет статус и прячет клавиатуру. Делается один раз (пока есть запись в
-        status-файле), потом чат забываем."""
+        """Remove the controls from a chat whose group disabled mute_controls:
+        unpin + delete the status and hide the keyboard. Runs once (while the
+        chat is still present in the status file), then the chat is forgotten."""
         entry = self.status.get(chat_id)
         if not entry:
-            return  # уже почищено / пульта тут и не было
+            return  # already cleaned up / never had controls
         sid = entry.get("status")
         if sid:
             try:
@@ -198,14 +198,14 @@ class MuteController:
                 reply_markup=ReplyKeyboardRemove(),
             )
         except TelegramError as e:
-            log.error(f"❌ Не удалось убрать клавиатуру в чате {chat_id}: {e}")
+            log.error(f"❌ Failed to remove keyboard in chat {chat_id}: {e}")
         del self.status[chat_id]
         _save_json(STATUS_FILE, self.status)
-        log.info(f"🧹 Пульт убран из чата {chat_id}")
+        log.info(f"🧹 Controls removed from chat {chat_id}")
 
     async def _ensure_keyboard(self, chat_id: str):
-        """Один раз показывает reply-клавиатуру (она остаётся внизу чата навсегда).
-        На рестартах не шлём повторно — клавиатура в Telegram сохраняется сама."""
+        """Show the reply keyboard once (it stays at the bottom of the chat).
+        Not resent on restarts — Telegram keeps the keyboard on its own."""
         entry = self._entry(chat_id)
         if entry.get("kb"):
             return
@@ -218,19 +218,19 @@ class MuteController:
             entry["kb"] = msg.message_id
             _save_json(STATUS_FILE, self.status)
         except TelegramError as e:
-            log.error(f"❌ Не удалось показать клавиатуру в чате {chat_id}: {e}")
+            log.error(f"❌ Failed to show keyboard in chat {chat_id}: {e}")
 
     async def _refresh_status(self, chat_id: str):
-        """Статус-сообщение нужно ТОЛЬКО во время паузы («🔕 пауза до X», закреплено).
-        Когда уведомления включены — статуса нет вообще (не занимаем экран): если он
-        оставался с прошлой паузы, удаляем его."""
+        """The status message exists ONLY while paused ("🔕 paused until X",
+        pinned). When notifications are on there is no status at all (don't
+        waste screen space): if one is left over from a past pause, delete it."""
         group_id, group_name = self.chat_to_group[chat_id]
         until = self._muted_until(group_id)
         muted = bool(until and until > time.time())
         entry = self._entry(chat_id)
         sid = entry.get("status")
 
-        # Уведомления включены — статус не нужен, убираем если оставался
+        # Notifications on — no status needed, remove a leftover if any
         if not muted:
             if sid:
                 try:
@@ -241,23 +241,23 @@ class MuteController:
                 _save_json(STATUS_FILE, self.status)
             return
 
-        # Пауза активна — показать/обновить закреплённый статус
+        # Pause active — show/update the pinned status
         text = _status_text(group_name, until)
         if sid:
             try:
                 await self.bot.edit_message_text(chat_id=int(chat_id), message_id=sid, text=text)
-                return  # правим на месте — без пересылок
+                return  # edited in place — no resends
             except BadRequest as e:
                 if "not modified" in str(e).lower():
                     return
-                # удалено/не редактируется — пересоздадим ниже
+                # deleted / not editable — recreate below
             except TelegramError:
                 return
 
         try:
-            msg = await self.bot.send_message(chat_id=int(chat_id), text=text)  # БЕЗ клавиатуры!
+            msg = await self.bot.send_message(chat_id=int(chat_id), text=text)  # NO keyboard!
         except TelegramError as e:
-            log.error(f"❌ Не удалось отправить статус в чате {chat_id}: {e}")
+            log.error(f"❌ Failed to send status in chat {chat_id}: {e}")
             return
         entry["status"] = msg.message_id
         _save_json(STATUS_FILE, self.status)
@@ -266,37 +266,37 @@ class MuteController:
                 chat_id=int(chat_id), message_id=msg.message_id, disable_notification=True
             )
         except TelegramError:
-            pass  # бот не админ — не закрепим, статус всё равно виден
+            pass  # bot isn't an admin — can't pin, status is still visible
 
     async def _handle_press(self, chat_id: str, text: str, message_id: int):
         group_id, group_name = self.chat_to_group[chat_id]
 
         if text == BTN_ON:
             self._set_mute(group_id, 0)
-            log.info(f"▶️ {group_id}: уведомления включены")
+            log.info(f"▶️ {group_id}: notifications resumed")
         elif text == BTN_MORNING:
             self._set_mute(group_id, time.time() + _minutes_until_morning() * 60)
-            log.info(f"🔕 {group_id}: пауза до утра")
+            log.info(f"🔕 {group_id}: paused until morning")
         elif text in FIXED_DURATIONS:
             minutes = FIXED_DURATIONS[text]
             self._set_mute(group_id, time.time() + minutes * 60)
-            log.info(f"🔕 {group_id}: пауза на {minutes} мин")
+            log.info(f"🔕 {group_id}: paused for {minutes} min")
         else:
-            return  # не наша кнопка
+            return  # not one of our buttons
 
         await self._refresh_status(chat_id)
-        # убираем «нажатие» из чата, чтобы не мусорить (нужны права на удаление)
+        # Delete the tap message to keep the chat clean (needs delete rights)
         try:
             await self.bot.delete_message(chat_id=int(chat_id), message_id=message_id)
         except TelegramError:
             pass
 
     async def run(self):
-        log.info(f"🚀 Mute Controller запущен. Чаты: {list(self.chat_to_group.keys())}")
-        # На старте: убрать пульт у отключённых групп...
+        log.info(f"🚀 Mute Controller started. Chats: {list(self.chat_to_group.keys())}")
+        # On start: remove controls from disabled groups...
         for chat_id in self.disabled_chats:
             await self._disable_chat(chat_id)
-        # ...и гарантировать клавиатуру + актуальный статус у активных
+        # ...and ensure keyboard + up-to-date status for the active ones
         for chat_id in self.chat_to_group:
             await self._ensure_keyboard(chat_id)
             await self._refresh_status(chat_id)
@@ -319,11 +319,11 @@ class MuteController:
                     continue
                 chat_id = str(msg.chat_id)
                 if chat_id not in self.chat_to_group:
-                    continue  # чужой чат
+                    continue  # not one of our chats
                 try:
                     await self._handle_press(chat_id, msg.text.strip(), msg.message_id)
                 except Exception as e:
-                    log.error(f"❌ Ошибка обработки нажатия: {e}")
+                    log.error(f"❌ Error handling button press: {e}")
 
 
 def main():
@@ -331,7 +331,7 @@ def main():
     try:
         asyncio.run(controller.run())
     except KeyboardInterrupt:
-        print("\n🛑 Остановлен")
+        print("\n🛑 Stopped")
 
 
 if __name__ == "__main__":

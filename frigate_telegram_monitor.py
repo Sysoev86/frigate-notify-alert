@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
-"""
-Frigate Telegram Monitor - Мониторинг событий Frigate и отправка в Telegram
-Поддерживает несколько групп камер с разными Telegram чатами
+"""Frigate -> Telegram monitor.
+
+Watches Frigate events (MQTT for real-time + API polling as a safety net) and
+sends the event's snapshot + clip to a Telegram chat as a media group.
+Supports multiple camera groups, each with its own chat (see config.py).
+
+Run: python frigate_telegram_monitor.py <group_id>
 """
 
 import asyncio
@@ -9,9 +13,10 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 
-# --version: печатаем версию и выходим (до тяжёлых импортов и без config.py)
+# --version: print and exit before heavy imports (works without config.py)
 if "--version" in sys.argv:
     _d = os.path.dirname(os.path.abspath(__file__))
     try:
@@ -20,14 +25,14 @@ if "--version" in sys.argv:
         print("frigate-notify-alert unknown")
     raise SystemExit(0)
 
-from typing import Dict, Any, List
+from typing import Any, Dict, Optional
+
 import aiohttp
+import paho.mqtt.client as mqtt
 from telegram import Bot, InputMediaPhoto, InputMediaVideo
 from telegram.error import TelegramError
 from telegram.request import HTTPXRequest
-import paho.mqtt.client as mqtt
 
-# Импортируем конфигурацию
 try:
     from config import *
 except ModuleNotFoundError as _e:
@@ -37,33 +42,46 @@ except ModuleNotFoundError as _e:
         raise SystemExit(1)
     raise
 
-# Файл общего состояния паузы (mute). Пишет его mute_controller, читают мониторы.
-# Путь можно переопределить в config.py (MUTE_STATE_FILE), иначе — рядом со скриптом.
+# --- Optional config values (defaults keep previous behavior) --------------
+# `from config import *` puts user settings into this module's globals; for
+# anything the user omitted we fall back to a sane default here, so old
+# configs keep working and every documented option actually has an effect.
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+OBJECTS = list(globals().get("OBJECTS") or
+               ["person", "car", "truck", "bus", "motorcycle", "bicycle"])
+LOG_LEVEL = str(globals().get("LOG_LEVEL") or "INFO").upper()
+LOG_FORMAT = str(globals().get("LOG_FORMAT") or "%(asctime)s - %(levelname)s - %(message)s")
+STATS_INTERVAL = int(globals().get("STATS_INTERVAL") or 60)
+MEDIA_RETRY_ATTEMPTS = int(globals().get("MEDIA_RETRY_ATTEMPTS") or 15)
+MEDIA_RETRY_DELAY = int(globals().get("MEDIA_RETRY_DELAY") or 3)
+# Shared pause-state file written by mute_controller, read by the monitors.
 MUTE_STATE_FILE = globals().get("MUTE_STATE_FILE") or os.path.join(_SCRIPT_DIR, "mute_state.json")
+
+POLL_INTERVAL = 3          # seconds between /api/events polls
+MIN_MEDIA_BYTES = 1000     # smaller responses are treated as "not ready yet"
+QUEUE_MAX_RETRIES = 10     # polls to wait for media before dropping an event
+
 
 class FrigateTelegramMonitor:
     def __init__(self, group_id: str):
-        """Инициализация монитора для указанной группы"""
         self.group_id = group_id
         self.group_config = GROUPS[group_id]
 
-        # Момент запуска: события, завершившиеся ДО него, не шлём (иначе при старте
-        # улетает вся история из /api/events, т.к. список обработанных ещё пуст).
+        # Events that finished BEFORE this moment are history from /api/events
+        # (the processed set starts empty) — never send them.
         self.startup_ts = time.time()
 
-        # Настройка логирования
         self.logger = self._setup_logging()
-        
-        # Статистика
+
         self.stats = {
             "start_time": time.time(),
             "events_processed": 0,
             "telegram_sent": 0,
-            "errors": 0
+            "errors": 0,
         }
-        
-        # Telegram бот (увеличенные таймауты + прокси для обхода блокировок)
+
+        # Telegram bot (generous timeouts; optional proxy for blocked ISPs)
         request_kw: dict = {
             "connect_timeout": 30,
             "read_timeout": 120,
@@ -72,74 +90,65 @@ class FrigateTelegramMonitor:
         }
         if TELEGRAM_PROXY_URL:
             request_kw["proxy"] = TELEGRAM_PROXY_URL
-            self.logger.info(f"📡 Telegram через прокси: {TELEGRAM_PROXY_URL.split('@')[1]}")
-        request = HTTPXRequest(**request_kw)
-        self.bot = Bot(token=TELEGRAM_BOT_TOKEN, request=request)
-        
-        # Списки камер и объектов
-        self.cameras = self.group_config["cameras"]
-        self.objects = ["person", "car", "truck", "bus", "motorcycle", "bicycle"]
+            self.logger.info(f"📡 Telegram via proxy: {TELEGRAM_PROXY_URL.split('@')[-1]}")
+        self.bot = Bot(token=TELEGRAM_BOT_TOKEN, request=HTTPXRequest(**request_kw))
 
-        # Фильтр по зонам Frigate (необязательный).
-        # Пусто/нет ключа "zones" в группе = слать по всей камере (как раньше).
-        # Если задан список зон — уведомление уйдёт, только если объект заходил
-        # хотя бы в одну из этих зон (поле события Frigate entered_zones).
+        # Cameras / tracked objects; a group may override the global OBJECTS
+        self.cameras = self.group_config["cameras"]
+        self.objects = list(self.group_config.get("objects") or OBJECTS)
+
+        # Optional Frigate zone filter: if set, notify only when the object
+        # entered at least one of these zones. Empty/missing = whole camera.
         self.zones = self.group_config.get("zones") or []
         if self.zones:
-            self.logger.info(f"🧭 Фильтр по зонам включён: {', '.join(self.zones)}")
-        
-        # ID обработанных событий (чтобы не дублировать)
-        # Ограничиваем размер, чтобы не накапливать слишком много
+            self.logger.info(f"🧭 Zone filter enabled: {', '.join(self.zones)}")
+
+        # Dedup: IDs of already-handled events (bounded so memory stays flat)
         self.processed_events = set()
-        self.max_processed_events = 1000  # Максимум 1000 ID в памяти
-        
-        # События для повторной проверки (если медиа еще не готово)
-        # {event_id: (event_data, retry_count)}
-        self.retry_events = {}
-        self.max_retries = 10  # Максимум 10 попыток (30 секунд)
-        
-        # MQTT клиент для получения событий в реальном времени
+        self.max_processed_events = 1000
+
+        # Events whose media isn't ready yet: {event_id: (event, retry_count)}
+        self.retry_events: Dict[str, tuple] = {}
+
+        # Real-time path
         self.mqtt_client = None
-        self.mqtt_connected = False
         self.event_loop = None
-        
-        # Очередь событий из MQTT для обработки
-        self.mqtt_event_queue = None
-        
-        self.logger.info(f"🚀 Инициализация монитора для группы: {self.group_config['name']}")
-    
-    def _setup_logging(self):
-        """Настройка логирования"""
+        self.mqtt_event_queue: Optional[asyncio.Queue] = None
+
+        # One HTTP session for all Frigate requests (created in start_monitoring)
+        self.http: Optional[aiohttp.ClientSession] = None
+
+        self.logger.info(f"🚀 Monitor initialized for group: {self.group_config['name']}")
+
+    # ------------------------------------------------------------------ setup
+
+    def _setup_logging(self) -> logging.Logger:
         logger = logging.getLogger(f"frigate_monitor_{self.group_id}")
-        logger.setLevel(logging.INFO)
-        
-        # Форматтер с эмодзи и московским временем
-        formatter = logging.Formatter(
-            '%(asctime)s - %(levelname)s - %(message)s',
-            datefmt='%d.%m.%Y %H:%M:%S'
+        logger.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
+        if logger.handlers:  # don't stack handlers on re-init
+            return logger
+
+        formatter = logging.Formatter(LOG_FORMAT, datefmt="%d.%m.%Y %H:%M:%S")
+
+        console = logging.StreamHandler()
+        console.setFormatter(formatter)
+        logger.addHandler(console)
+
+        file_handler = logging.FileHandler(
+            os.path.join(_SCRIPT_DIR, f"frigate_monitor_{self.group_id}.log")
         )
-        
-        # Консольный вывод
-        console_handler = logging.StreamHandler()
-        console_handler.setFormatter(formatter)
-        logger.addHandler(console_handler)
-        
-        # Файловый вывод
-        file_handler = logging.FileHandler(f"frigate_monitor_{self.group_id}.log")
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
-        
+
         return logger
 
+    # ---------------------------------------------------------------- filters
+
     def _zone_ok(self, event: Dict[str, Any]) -> bool:
-        """Проверка фильтра по зонам.
+        """True if no zone filter is set OR the object entered a wanted zone.
 
-        True — если фильтр не задан (self.zones пуст) ИЛИ объект заходил
-        хотя бы в одну из нужных зон.
-
-        Frigate отдаёт список зон под разными ключами: в MQTT-событии это
-        entered_zones, в HTTP /api/events — zones. Берём объединение обоих,
-        чтобы фильтр одинаково работал в обоих путях обработки.
+        Frigate exposes zones under different keys: `entered_zones` in MQTT
+        payloads, `zones` in /api/events — check the union so both paths agree.
         """
         if not self.zones:
             return True
@@ -147,10 +156,10 @@ class FrigateTelegramMonitor:
         return bool(entered & set(self.zones))
 
     def _is_muted(self) -> bool:
-        """Проверяет общий файл паузы: стоит ли сейчас пауза для этой группы.
+        """Whether this group is currently paused via the Telegram buttons.
 
-        Файлом управляет mute_controller (кнопки в Telegram). Формат:
-        {"group1": {"muted_until": <epoch_sec>}, ...}. Нет файла/ключа = не заглушено.
+        The mute_controller writes {"<group>": {"muted_until": <epoch>}} —
+        missing file/key means not muted.
         """
         try:
             with open(MUTE_STATE_FILE, "r", encoding="utf-8") as f:
@@ -160,261 +169,187 @@ class FrigateTelegramMonitor:
         until = (state.get(self.group_id) or {}).get("muted_until", 0)
         return bool(until and until > time.time())
 
+    # ------------------------------------------------------------- API polling
+
     async def _check_frigate_events(self):
-        """Периодическая проверка событий через Frigate API"""
+        """Poll /api/events: pick up finished events and drive the retry queue."""
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(f"{FRIGATE_URL}/api/events") as response:
-                    if response.status == 200:
-                        events = await response.json()
-                        
-                        # Логируем общее количество событий
-                        total_events = len(events)
-                        our_camera_events = [e for e in events if e.get("camera") in self.cameras]
-                        self.logger.info(f"📊 Всего событий в API: {total_events}, для наших камер: {len(our_camera_events)}")
-                        
-                        # Логируем детали ВСЕХ событий для наших камер
-                        if our_camera_events:
-                            self.logger.info(f"🔍 Все события для наших камер ({len(our_camera_events)}):")
-                            for e in our_camera_events:
-                                event_id = e.get('id')
-                                is_processed = event_id in self.processed_events
-                                status = "✅ обработано" if is_processed else "⏳ новое"
-                                self.logger.info(
-                                    f"  - {event_id}: {e.get('label')}, "
-                                    f"end_time={e.get('end_time')}, "
-                                    f"has_snapshot={e.get('has_snapshot')}, "
-                                    f"has_clip={e.get('has_clip')}, "
-                                    f"{status}"
-                                )
-                        
-                        # Счетчики для статистики
-                        skipped_no_end_time = 0
-                        skipped_wrong_camera = 0
-                        skipped_wrong_object = 0
-                        skipped_wrong_zone = 0
-                        skipped_old = 0
-                        skipped_no_snapshot = 0
-                        skipped_no_clip = 0
-                        already_processed = 0
-                        new_events = 0
-                        
-                        # Сортируем события по времени окончания (новые первыми)
-                        events_sorted = sorted(events, key=lambda x: x.get("end_time", 0) or 0, reverse=True)
-                        
-                        for event in events_sorted:
-                            event_id = event.get("id")
-                            
-                            camera = event.get("camera")
-                            object_type = event.get("label")
-                            end_time = event.get("end_time")
-                            has_snapshot = event.get("has_snapshot", False)
-                            has_clip = event.get("has_clip", False)
-                            
-                            # Проверяем условия обработки
-                            if not end_time:
-                                skipped_no_end_time += 1
-                                # Логируем только для наших камер
-                                if camera in self.cameras:
-                                    self.logger.debug(
-                                        f"⏳ Событие {event_id} ({object_type} на {camera}): "
-                                        f"еще не завершено (нет end_time)"
-                                    )
-                                continue  # Пропускаем незавершенные события
-                            
-                            # Пропускаем события, которые уже обработаны (по ID)
-                            if event_id in self.processed_events:
-                                already_processed += 1
-                                continue
-                            
-                            if camera not in self.cameras:
-                                skipped_wrong_camera += 1
-                                continue  # Пропускаем события с других камер
-                            
-                            if object_type not in self.objects:
-                                skipped_wrong_object += 1
-                                self.logger.debug(
-                                    f"⏭️ Пропуск события {event_id} ({object_type} на {camera}): "
-                                    f"объект '{object_type}' не в списке отслеживаемых"
-                                )
-                                continue
-
-                            # Событие завершилось ДО запуска скрипта — это «история» из API,
-                            # не шлём (иначе при каждом старте улетает бэклог за последний час).
-                            # Помечаем обработанным, чтобы больше не рассматривать.
-                            if end_time < self.startup_ts:
-                                self.processed_events.add(event_id)
-                                skipped_old += 1
-                                self.logger.debug(
-                                    f"⏭️ Пропуск старого события {event_id} ({object_type} на {camera}): "
-                                    f"завершилось до запуска (end_time={end_time} < старт={self.startup_ts:.0f})"
-                                )
-                                continue
-
-                            # Фильтр по зонам: объект не заходил в нужную зону — пропускаем
-                            if not self._zone_ok(event):
-                                skipped_wrong_zone += 1
-                                self.logger.debug(
-                                    f"⏭️ Пропуск события {event_id} ({object_type} на {camera}): "
-                                    f"вне нужных зон {self.zones} "
-                                    f"(был в {event.get('entered_zones') or event.get('zones') or []})"
-                                )
-                                continue
-
-                            # Если медиа еще не готово, добавляем в список для повторной проверки
-                            if not has_snapshot or not has_clip:
-                                if event_id not in self.retry_events:
-                                    self.retry_events[event_id] = (event, 0)
-                                    self.logger.info(
-                                        f"⏳ Событие {event_id} ({object_type} на {camera}): "
-                                        f"медиа еще не готово (snapshot={has_snapshot}, clip={has_clip}), "
-                                        f"добавлено в очередь повторной проверки"
-                                    )
-                                else:
-                                    # Увеличиваем счетчик попыток
-                                    old_event, retry_count = self.retry_events[event_id]
-                                    self.retry_events[event_id] = (event, retry_count + 1)
-                                    
-                                    if retry_count + 1 >= self.max_retries:
-                                        self.logger.warning(
-                                            f"❌ Событие {event_id} ({object_type} на {camera}): "
-                                            f"медиа не появилось после {self.max_retries} попыток, пропускаем"
-                                        )
-                                        del self.retry_events[event_id]
-                                        if not has_snapshot:
-                                            skipped_no_snapshot += 1
-                                        if not has_clip:
-                                            skipped_no_clip += 1
-                                continue
-                            
-                            # Если событие было в очереди повторной проверки, удаляем его
-                            if event_id in self.retry_events:
-                                old_event, retry_count = self.retry_events[event_id]
-                                del self.retry_events[event_id]
-                                self.logger.info(
-                                    f"✅ Событие {event_id} ({object_type} на {camera}): "
-                                    f"медиа появилось после {retry_count + 1} попыток"
-                                )
-                            
-                            # Обрабатываем событие (требуем и фото, и видео)
-                            self.logger.info(f"🎯 Обнаружен объект: {object_type} на камере {camera} (snapshot: {has_snapshot}, clip: {has_clip}, end_time: {end_time})")
-                            self.logger.info(f"🔄 Обработка завершенного события {event_id} для камеры {camera}")
-                            
-                            # Обрабатываем событие
-                            await self._process_frigate_event(event, source="api-poll")
-                            
-                            # Помечаем как обработанное
-                            self.processed_events.add(event_id)
-                            
-                            # Ограничиваем размер set, удаляя старые записи
-                            if len(self.processed_events) > self.max_processed_events:
-                                # Удаляем самые старые (первые в отсортированном списке)
-                                old_events = sorted(self.processed_events)[:len(self.processed_events) - self.max_processed_events + 100]
-                                for old_id in old_events:
-                                    self.processed_events.discard(old_id)
-                            
-                            new_events += 1
-                        
-                        # Проверяем события из retry_events, которых нет в общем списке API
-                        # но могут быть доступны по прямому URL
-                        event_ids_in_api = {e.get("id") for e in events}
-                        retry_events_to_check = []
-                        retry_events_to_remove = []
-                        current_time = time.time()
-                        
-                        async with aiohttp.ClientSession() as session:
-                            for retry_event_id, (retry_event, retry_count) in list(self.retry_events.items()):
-                                # Если события нет в общем списке API, проверяем по прямому URL
-                                if retry_event_id not in event_ids_in_api:
-                                    try:
-                                        async with session.get(f"{FRIGATE_URL}/api/events/{retry_event_id}", timeout=5) as response:
-                                            if response.status == 200:
-                                                # Событие найдено по прямому URL, обновляем данные
-                                                updated_event = await response.json()
-                                                has_snapshot = updated_event.get("has_snapshot", False)
-                                                has_clip = updated_event.get("has_clip", False)
-                                                
-                                                if has_snapshot and has_clip:
-                                                    self.logger.info(
-                                                        f"✅ Событие {retry_event_id} найдено по прямому URL и готово к обработке "
-                                                        f"(snapshot: {has_snapshot}, clip: {has_clip}, попытка {retry_count + 1})"
-                                                    )
-                                                    await self._process_frigate_event(updated_event, source="api-retry")
-                                                    del self.retry_events[retry_event_id]
-                                                else:
-                                                    # Обновляем событие в очереди
-                                                    self.retry_events[retry_event_id] = (updated_event, retry_count + 1)
-                                                    if retry_count + 1 >= self.max_retries:
-                                                        self.logger.warning(
-                                                            f"❌ Событие {retry_event_id}: медиа не появилось после {self.max_retries} попыток"
-                                                        )
-                                                        retry_events_to_remove.append(retry_event_id)
-                                            elif response.status == 404:
-                                                # Событие удалено из API, проверяем время
-                                                retry_end_time = retry_event.get("end_time", 0)
-                                                if retry_end_time > 0 and (current_time - retry_end_time) > 300:  # 5 минут
-                                                    retry_events_to_remove.append(retry_event_id)
-                                            else:
-                                                # Другая ошибка, увеличиваем счетчик
-                                                self.retry_events[retry_event_id] = (retry_event, retry_count + 1)
-                                                if retry_count + 1 >= self.max_retries:
-                                                    retry_events_to_remove.append(retry_event_id)
-                                    except Exception as e:
-                                        self.logger.debug(f"⚠️ Ошибка проверки события {retry_event_id} по прямому URL: {e}")
-                                        # Увеличиваем счетчик при ошибке
-                                        self.retry_events[retry_event_id] = (retry_event, retry_count + 1)
-                                        if retry_count + 1 >= self.max_retries:
-                                            retry_events_to_remove.append(retry_event_id)
-                                else:
-                                    # Событие есть в общем списке, оно будет обработано выше
-                                    pass
-                        
-                        # Удаляем старые события
-                        for retry_event_id in retry_events_to_remove:
-                            retry_event, retry_count = self.retry_events[retry_event_id]
-                            self.logger.warning(
-                                f"🗑️ Удаление события {retry_event_id} из очереди повторной проверки: "
-                                f"событие удалено из API или превышен лимит попыток (было {retry_count} попыток)"
-                            )
-                            del self.retry_events[retry_event_id]
-                        
-                        # Логируем статистику
-                        if new_events > 0 or skipped_no_end_time > 0 or skipped_wrong_camera > 0 or skipped_wrong_object > 0 or skipped_wrong_zone > 0 or skipped_old > 0 or skipped_no_snapshot > 0 or skipped_no_clip > 0 or already_processed > 0 or len(self.retry_events) > 0:
-                            self.logger.info(
-                                f"📊 Статистика: "
-                                f"новых обработано={new_events}, "
-                                f"уже обработано={already_processed}, "
-                                f"нет end_time={skipped_no_end_time}, "
-                                f"другая камера={skipped_wrong_camera}, "
-                                f"другой объект={skipped_wrong_object}, "
-                                f"другая зона={skipped_wrong_zone}, "
-                                f"старое (до старта)={skipped_old}, "
-                                f"нет snapshot={skipped_no_snapshot}, "
-                                f"нет clip={skipped_no_clip}, "
-                                f"в памяти ID={len(self.processed_events)}, "
-                                f"в очереди повторной проверки={len(self.retry_events)}"
-                            )
-                                
+            async with self.http.get(f"{FRIGATE_URL}/api/events") as response:
+                if response.status != 200:
+                    self.logger.warning(f"⚠️ /api/events returned HTTP {response.status}")
+                    return
+                events = await response.json()
         except Exception as e:
-            self.logger.error(f"❌ Ошибка проверки событий Frigate: {e}")
-    
+            self.logger.error(f"❌ Failed to poll Frigate events: {e}")
+            return
+
+        ours = [e for e in events if e.get("camera") in self.cameras]
+        self.logger.debug(f"📊 API events: {len(events)} total, {len(ours)} for our cameras")
+
+        counters = {
+            "new": 0, "already": 0, "no_end_time": 0, "other_camera": 0,
+            "other_object": 0, "other_zone": 0, "old": 0, "media_timeout": 0,
+        }
+
+        # Newest first
+        events_sorted = sorted(events, key=lambda x: x.get("end_time", 0) or 0, reverse=True)
+
+        for event in events_sorted:
+            event_id = event.get("id")
+            camera = event.get("camera")
+            object_type = event.get("label")
+            end_time = event.get("end_time")
+            has_snapshot = event.get("has_snapshot", False)
+            has_clip = event.get("has_clip", False)
+
+            if not end_time:
+                counters["no_end_time"] += 1
+                continue  # still in progress
+            if event_id in self.processed_events:
+                counters["already"] += 1
+                continue
+            if camera not in self.cameras:
+                counters["other_camera"] += 1
+                continue
+            if object_type not in self.objects:
+                counters["other_object"] += 1
+                self.logger.debug(f"⏭️ {event_id}: '{object_type}' not tracked, skipping")
+                continue
+
+            # Finished before we started -> history, mark and never send
+            if end_time < self.startup_ts:
+                self.processed_events.add(event_id)
+                counters["old"] += 1
+                continue
+
+            if not self._zone_ok(event):
+                counters["other_zone"] += 1
+                self.logger.debug(
+                    f"⏭️ {event_id}: outside wanted zones {self.zones} "
+                    f"(was in {event.get('entered_zones') or event.get('zones') or []})"
+                )
+                continue
+
+            # Media not ready yet -> park it in the retry queue
+            if not has_snapshot or not has_clip:
+                if event_id not in self.retry_events:
+                    self.retry_events[event_id] = (event, 0)
+                    self.logger.info(
+                        f"⏳ {event_id} ({object_type}@{camera}): media not ready "
+                        f"(snapshot={has_snapshot}, clip={has_clip}), queued for retry"
+                    )
+                else:
+                    _, retry_count = self.retry_events[event_id]
+                    self.retry_events[event_id] = (event, retry_count + 1)
+                    if retry_count + 1 >= QUEUE_MAX_RETRIES:
+                        self.logger.warning(
+                            f"❌ {event_id} ({object_type}@{camera}): media never appeared "
+                            f"after {QUEUE_MAX_RETRIES} polls, dropping"
+                        )
+                        del self.retry_events[event_id]
+                        counters["media_timeout"] += 1
+                continue
+
+            if event_id in self.retry_events:
+                _, retry_count = self.retry_events.pop(event_id)
+                self.logger.info(f"✅ {event_id}: media appeared after {retry_count + 1} polls")
+
+            self.logger.info(
+                f"🎯 Detected: {object_type} on {camera} "
+                f"(snapshot={has_snapshot}, clip={has_clip}, end_time={end_time})"
+            )
+            await self._process_frigate_event(event, source="api-poll")
+
+            self.processed_events.add(event_id)
+            self._trim_processed()
+            counters["new"] += 1
+
+        await self._check_retry_queue({e.get("id") for e in events})
+
+        summary = (
+            f"📊 Poll: new={counters['new']}, already={counters['already']}, "
+            f"in_progress={counters['no_end_time']}, other_camera={counters['other_camera']}, "
+            f"other_object={counters['other_object']}, other_zone={counters['other_zone']}, "
+            f"old={counters['old']}, media_timeout={counters['media_timeout']}, "
+            f"known_ids={len(self.processed_events)}, retry_queue={len(self.retry_events)}"
+        )
+        # INFO only when something was actually sent; routine polls stay at DEBUG
+        self.logger.log(logging.INFO if counters["new"] else logging.DEBUG, summary)
+
+    async def _check_retry_queue(self, ids_in_api: set):
+        """Re-check queued events that dropped out of the /api/events list."""
+        now = time.time()
+        to_remove = []
+
+        for event_id, (event, retry_count) in list(self.retry_events.items()):
+            if event_id in ids_in_api:
+                continue  # still in the list, main loop handles it
+
+            try:
+                async with self.http.get(
+                    f"{FRIGATE_URL}/api/events/{event_id}",
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as response:
+                    if response.status == 200:
+                        updated = await response.json()
+                        if updated.get("has_snapshot") and updated.get("has_clip"):
+                            self.logger.info(
+                                f"✅ {event_id}: found via direct URL, media ready "
+                                f"(poll {retry_count + 1})"
+                            )
+                            await self._process_frigate_event(updated, source="api-retry")
+                            del self.retry_events[event_id]
+                        else:
+                            self.retry_events[event_id] = (updated, retry_count + 1)
+                            if retry_count + 1 >= QUEUE_MAX_RETRIES:
+                                to_remove.append(event_id)
+                    elif response.status == 404:
+                        # Gone from the API; give up 5 minutes after it ended
+                        if (event.get("end_time") or 0) and now - event["end_time"] > 300:
+                            to_remove.append(event_id)
+                    else:
+                        self.retry_events[event_id] = (event, retry_count + 1)
+                        if retry_count + 1 >= QUEUE_MAX_RETRIES:
+                            to_remove.append(event_id)
+            except Exception as e:
+                self.logger.debug(f"⚠️ Direct check failed for {event_id}: {e}")
+                self.retry_events[event_id] = (event, retry_count + 1)
+                if retry_count + 1 >= QUEUE_MAX_RETRIES:
+                    to_remove.append(event_id)
+
+        for event_id in to_remove:
+            _, retry_count = self.retry_events.pop(event_id)
+            self.logger.warning(
+                f"🗑️ {event_id}: dropped from retry queue "
+                f"(gone from API or retry limit hit after {retry_count} polls)"
+            )
+
+    def _trim_processed(self):
+        """Keep the dedup set bounded (drop the oldest IDs)."""
+        if len(self.processed_events) > self.max_processed_events:
+            overflow = len(self.processed_events) - self.max_processed_events + 100
+            for old_id in sorted(self.processed_events)[:overflow]:
+                self.processed_events.discard(old_id)
+
+    # ---------------------------------------------------------------- sending
+
     async def _process_frigate_event(self, event: Dict[str, Any], source: str = "?"):
-        """Обработка события из Frigate API. source — откуда пришло (mqtt/api-poll/api-retry)."""
+        """Send one finished event to Telegram (photo + clip)."""
         try:
             event_id = event.get("id")
             camera = event.get("camera")
             object_type = event.get("label")
 
-            # Пауза уведомлений (кнопки в Telegram): если стоит — тихо пропускаем
             if self._is_muted():
                 self.logger.info(
-                    f"🔕 Пауза активна для {self.group_id} — событие {event_id} "
-                    f"({object_type} на {camera}) не отправляем"
+                    f"🔕 Pause active for {self.group_id} — not sending "
+                    f"{event_id} ({object_type}@{camera})"
                 )
                 return
 
-            # Диагностика: длительность события и сколько прошло от его конца до отправки.
-            # Если clip приходит короче duration — значит Frigate ещё дописывал запись.
+            # Diagnostics: event length and how long after its end we send.
+            # A clip much shorter than `duration` means Frigate was still
+            # finalizing the recording.
             start_time = event.get("start_time")
             end_time = event.get("end_time")
             duration = round(end_time - start_time, 1) if (start_time and end_time) else "?"
@@ -425,387 +360,279 @@ class FrigateTelegramMonitor:
                 f"snapshot={event.get('has_snapshot')} clip={event.get('has_clip')}"
             )
 
-            # Формируем URL для медиа
             photo_url = f"{FRIGATE_URL}/api/events/{event_id}/snapshot.jpg?crop=1"
             video_url = f"{FRIGATE_URL}/api/events/{event_id}/clip.mp4"
 
-            self.logger.info(f"🔗 Snapshot URL: {photo_url}")
-            self.logger.info(f"🔗 Clip URL: {video_url}")
-            
-            # Отправляем медиа (требуем и фото, и видео)
-            success = await self._send_telegram_media_group_with_retry(photo_url, video_url, event_id)
-            
+            success = await self._send_event_media(photo_url, video_url, event_id)
             if success:
-                self.logger.info(f"✅ Медиа успешно отправлены для события {event_id}")
+                self.logger.info(f"✅ Media sent for event {event_id}")
                 self.stats["telegram_sent"] += 1
             else:
-                self.logger.error(f"❌ Не удалось отправить медиа для события {event_id}")
+                self.logger.error(f"❌ Failed to send media for event {event_id}")
                 self.stats["errors"] += 1
-            
+
             self.stats["events_processed"] += 1
-            
+
         except Exception as e:
-            self.logger.error(f"❌ Ошибка обработки события: {e}")
+            self.logger.error(f"❌ Error processing event: {e}")
             self.stats["errors"] += 1
-    
-    async def _send_telegram_media_group_with_retry(self, photo_url: str, video_url: str, event_id: str) -> bool:
-        """Отправка медиа группы с повторными попытками загрузки"""
-        for attempt in range(15):  # 15 попыток по 3 секунды = 45 секунд
-            try:
-                # Проверяем доступность медиа
-                has_photo = False
-                has_video = False
-                
-                async with aiohttp.ClientSession() as session:
-                    # Проверяем фото
-                    try:
-                        self.logger.info(f"🔍 Попытка {attempt + 1}: проверка фото {photo_url}")
-                        async with session.get(photo_url, timeout=10) as response:
-                            self.logger.info(f"📸 HTTP ответ фото: {response.status}")
-                            if response.status == 200:
-                                photo_data = await response.read()
-                                self.logger.info(f"📸 Размер фото: {len(photo_data)} байт")
-                                if len(photo_data) > 1000:  # Минимальный размер файла
-                                    has_photo = True
-                                    self.logger.info(f"📸 Фото загружено успешно")
-                                else:
-                                    self.logger.warning(f"📸 Фото слишком маленькое: {len(photo_data)} байт")
-                            else:
-                                self.logger.warning(f"📸 Фото недоступно: HTTP {response.status}")
-                    except Exception as e:
-                        self.logger.error(f"📸 Ошибка загрузки фото (попытка {attempt + 1}): {e}")
-                    
-                    # Проверяем видео
-                    try:
-                        self.logger.info(f"🔍 Попытка {attempt + 1}: проверка видео {video_url}")
-                        async with session.get(video_url, timeout=10) as response:
-                            self.logger.info(f"🎥 HTTP ответ видео: {response.status}")
-                            if response.status == 200:
-                                video_data = await response.read()
-                                self.logger.info(f"🎥 Размер видео: {len(video_data)} байт")
-                                if len(video_data) > 1000:  # Минимальный размер файла
-                                    has_video = True
-                                    self.logger.info(f"🎥 Видео загружено успешно")
-                                else:
-                                    self.logger.warning(f"🎥 Видео слишком маленькое: {len(video_data)} байт")
-                            else:
-                                self.logger.warning(f"🎥 Видео недоступно: HTTP {response.status}")
-                    except Exception as e:
-                        self.logger.error(f"🎥 Ошибка загрузки видео (попытка {attempt + 1}): {e}")
-                
-                # Если оба файла доступны, отправляем
-                if has_photo and has_video:
-                    self.logger.info(f"📸 Найден snapshot и clip для {event_id} (попытка {attempt + 1})")
-                    return await self._send_telegram_media_group(photo_url, video_url)
-                
-                # Ждем перед следующей попыткой
-                if attempt < 14:
-                    await asyncio.sleep(3)
-                
-            except Exception as e:
-                self.logger.error(f"❌ Ошибка при попытке {attempt + 1}: {e}")
-                if attempt < 14:
-                    await asyncio.sleep(3)
-        
-        self.logger.error(f"❌ Медиа не появились для {event_id} после 15 попыток")
-        return False
-    
-    async def _send_telegram_media_group(self, photo_url: str, video_url: str) -> bool:
-        """Отправка медиа группы в Telegram"""
+
+    async def _download(self, url: str, timeout_s: int, label: str) -> Optional[bytes]:
+        """Fetch a media file; None if unavailable or suspiciously small."""
         try:
-            # Загружаем медиа файлы локально
-            photo_data = None
-            video_data = None
-            
-            async with aiohttp.ClientSession() as session:
-                # Загружаем фото
-                async with session.get(photo_url, timeout=aiohttp.ClientTimeout(total=45)) as response:
-                    if response.status == 200:
-                        photo_data = await response.read()
-                        self.logger.info(f"📸 Фото загружено: {len(photo_data)} байт")
-                    else:
-                        self.logger.error(f"❌ Ошибка загрузки фото: HTTP {response.status}")
-                        return False
-                
-                # Загружаем видео
-                async with session.get(video_url, timeout=aiohttp.ClientTimeout(total=90)) as response:
-                    if response.status == 200:
-                        video_data = await response.read()
-                        self.logger.info(
-                            f"🎥 Clip downloaded: {len(video_data)} bytes "
-                            f"({len(video_data)/1024/1024:.2f} MB)"
-                        )
-                    else:
-                        self.logger.error(f"❌ Ошибка загрузки видео: HTTP {response.status}")
-                        return False
-            
-            # Создаем медиа группу с загруженными данными
-            media_group = [
-                InputMediaPhoto(media=photo_data),
-                InputMediaVideo(media=video_data)
-            ]
-            
-            # Отправляем беззвучно
+            async with self.http.get(
+                url, timeout=aiohttp.ClientTimeout(total=timeout_s)
+            ) as response:
+                if response.status != 200:
+                    self.logger.debug(f"{label}: HTTP {response.status}")
+                    return None
+                data = await response.read()
+                if len(data) < MIN_MEDIA_BYTES:
+                    self.logger.debug(f"{label}: too small ({len(data)} bytes), not ready")
+                    return None
+                return data
+        except Exception as e:
+            self.logger.debug(f"{label}: download error: {e}")
+            return None
+
+    async def _send_event_media(self, photo_url: str, video_url: str, event_id: str) -> bool:
+        """Download snapshot + clip (retrying while Frigate finalizes them),
+        then send both as one media group. Each file is downloaded once."""
+        photo_data = video_data = None
+
+        for attempt in range(1, MEDIA_RETRY_ATTEMPTS + 1):
+            if photo_data is None:
+                photo_data = await self._download(photo_url, 45, f"📸 snapshot {event_id}")
+            if video_data is None:
+                video_data = await self._download(video_url, 90, f"🎥 clip {event_id}")
+
+            if photo_data is not None and video_data is not None:
+                self.logger.info(
+                    f"🎥 Clip downloaded: {len(video_data)} bytes "
+                    f"({len(video_data) / 1024 / 1024:.2f} MB) | "
+                    f"snapshot {len(photo_data)} bytes (attempt {attempt})"
+                )
+                return await self._send_media_group(photo_data, video_data)
+
+            self.logger.debug(
+                f"⏳ {event_id}: media not ready (attempt {attempt}/{MEDIA_RETRY_ATTEMPTS}, "
+                f"photo={'ok' if photo_data else 'no'}, video={'ok' if video_data else 'no'})"
+            )
+            if attempt < MEDIA_RETRY_ATTEMPTS:
+                await asyncio.sleep(MEDIA_RETRY_DELAY)
+
+        self.logger.error(f"❌ Media never became available for {event_id} "
+                          f"after {MEDIA_RETRY_ATTEMPTS} attempts")
+        return False
+
+    async def _send_media_group(self, photo_data: bytes, video_data: bytes) -> bool:
+        """Send photo + video to the group's chat as one silent media group."""
+        try:
             await self.bot.send_media_group(
                 chat_id=self.group_config["telegram_chat_id"],
-                media=media_group,
-                disable_notification=True
+                media=[InputMediaPhoto(media=photo_data), InputMediaVideo(media=video_data)],
+                disable_notification=True,
             )
-            
-            self.logger.info("✅ Медиа группа отправлена успешно")
+            self.logger.info("✅ Media group sent")
             return True
-            
         except TelegramError as e:
-            self.logger.error(f"❌ Ошибка Telegram: {e}")
+            self.logger.error(f"❌ Telegram error: {e}")
             return False
         except Exception as e:
-            self.logger.error(f"❌ Ошибка отправки медиа: {e}")
+            self.logger.error(f"❌ Failed to send media: {e}")
             return False
-    
+
+    # ------------------------------------------------------------------ stats
+
     def _start_stats_timer(self):
-        """Запуск таймера статистики"""
         def stats_timer():
             while True:
-                time.sleep(60)  # Каждую минуту
+                time.sleep(STATS_INTERVAL)
                 uptime = int(time.time() - self.stats["start_time"])
                 self.logger.info(
-                    f"📊 Статистика ({self.group_id}): "
-                    f"Время работы: {uptime} сек, "
-                    f"Событий обработано: {self.stats['events_processed']}, "
-                    f"Отправлено в Telegram: {self.stats['telegram_sent']}, "
-                    f"Ошибок: {self.stats['errors']}"
+                    f"📊 Stats ({self.group_id}): uptime={uptime}s, "
+                    f"processed={self.stats['events_processed']}, "
+                    f"sent={self.stats['telegram_sent']}, errors={self.stats['errors']}"
                 )
-        
-        import threading
-        stats_thread = threading.Thread(target=stats_timer, daemon=True)
-        stats_thread.start()
-    
+
+        threading.Thread(target=stats_timer, daemon=True).start()
+
+    # ------------------------------------------------------------------- MQTT
+
     def _on_mqtt_connect(self, client, userdata, flags, rc):
-        """Обработчик подключения к MQTT"""
         if rc == 0:
-            self.mqtt_connected = True
-            self.logger.info("✅ Подключено к MQTT брокеру")
-            # Подписываемся на все события Frigate
+            self.logger.info("✅ Connected to MQTT broker")
             client.subscribe(f"{MQTT_TOPIC_PREFIX}/events")
-            self.logger.info(f"📡 Подписка на топик: {MQTT_TOPIC_PREFIX}/events")
+            self.logger.info(f"📡 Subscribed to {MQTT_TOPIC_PREFIX}/events")
         else:
-            self.mqtt_connected = False
-            self.logger.error(f"❌ Ошибка подключения к MQTT: {rc}")
-    
+            self.logger.error(f"❌ MQTT connect failed: rc={rc}")
+
     def _on_mqtt_disconnect(self, client, userdata, rc):
-        """Обработчик отключения от MQTT"""
-        self.mqtt_connected = False
         if rc != 0:
-            self.logger.warning(f"⚠️ Неожиданное отключение от MQTT: {rc}")
+            self.logger.warning(f"⚠️ Unexpected MQTT disconnect: rc={rc}")
         else:
-            self.logger.info("🔌 Отключено от MQTT брокера")
-    
+            self.logger.info("🔌 Disconnected from MQTT broker")
+
     def _on_mqtt_message(self, client, userdata, msg):
-        """Обработчик сообщений MQTT"""
         try:
             payload = json.loads(msg.payload.decode())
             event_type = payload.get("type")
-            
-            # Обрабатываем завершенные события (end) и обновления с end_time (update)
-            event_data = None
-            if event_type == "end":
-                event_data = payload.get("after", {})
-            elif event_type == "update":
-                # Обрабатываем update только если есть end_time (событие завершено)
-                event_data = payload.get("after", {})
-                if not event_data.get("end_time"):
-                    return  # Событие еще не завершено
-            
-            if event_data:
-                camera = event_data.get("camera")
-                object_type = event_data.get("label")
-                event_id = event_data.get("id")
-                end_time = event_data.get("end_time")
-                
-                # Проверяем, что это событие для наших камер и объектов
-                if camera in self.cameras and object_type in self.objects and end_time:
-                    # Фильтр по зонам: если объект не был в нужной зоне — игнорируем
-                    if not self._zone_ok(event_data):
-                        self.logger.debug(
-                            f"⏭️ MQTT: пропуск {object_type} на {camera} (ID: {event_id}): "
-                            f"вне нужных зон {self.zones} "
-                            f"(был в {event_data.get('entered_zones') or []})"
-                        )
-                        return
-                    self.logger.info(
-                        f"📨 Получено событие из MQTT ({event_type}): {object_type} на {camera} "
-                        f"(ID: {event_id}, end_time: {end_time})"
-                    )
-                    # Добавляем в очередь для обработки
-                    if self.event_loop and self.mqtt_event_queue:
-                        asyncio.run_coroutine_threadsafe(
-                            self.mqtt_event_queue.put(event_data),
-                            self.event_loop
-                        )
+
+            # Care about finished events: type=end, or type=update carrying end_time
+            if event_type not in ("end", "update"):
+                return
+            event_data = payload.get("after", {})
+            if not event_data.get("end_time"):
+                return  # not finished yet
+
+            camera = event_data.get("camera")
+            object_type = event_data.get("label")
+            event_id = event_data.get("id")
+
+            if camera not in self.cameras or object_type not in self.objects:
+                return
+            if not self._zone_ok(event_data):
+                self.logger.debug(
+                    f"⏭️ MQTT: {object_type}@{camera} ({event_id}) outside wanted "
+                    f"zones {self.zones} (was in {event_data.get('entered_zones') or []})"
+                )
+                return
+
+            self.logger.info(
+                f"📨 MQTT event ({event_type}): {object_type} on {camera} (ID: {event_id})"
+            )
+            if self.event_loop and self.mqtt_event_queue:
+                asyncio.run_coroutine_threadsafe(
+                    self.mqtt_event_queue.put(event_data), self.event_loop
+                )
         except Exception as e:
-            self.logger.error(f"❌ Ошибка обработки MQTT сообщения: {e}")
-    
+            self.logger.error(f"❌ Error handling MQTT message: {e}")
+
     def _start_mqtt_client(self):
-        """Запуск MQTT клиента в отдельном потоке"""
         def mqtt_thread():
-            self.mqtt_client = mqtt.Client()
+            # paho-mqtt 2.x requires an explicit callback API version;
+            # VERSION1 keeps the same handler signatures as 1.x.
+            try:
+                self.mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1)
+            except AttributeError:  # paho-mqtt 1.x
+                self.mqtt_client = mqtt.Client()
             self.mqtt_client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
             self.mqtt_client.on_connect = self._on_mqtt_connect
             self.mqtt_client.on_disconnect = self._on_mqtt_disconnect
             self.mqtt_client.on_message = self._on_mqtt_message
-            
             try:
                 self.mqtt_client.connect(MQTT_BROKER_HOST, MQTT_BROKER_PORT, 60)
                 self.mqtt_client.loop_forever()
             except Exception as e:
-                self.logger.error(f"❌ Ошибка MQTT клиента: {e}")
-        
-        import threading
-        thread = threading.Thread(target=mqtt_thread, daemon=True)
-        thread.start()
-        self.logger.info("🚀 MQTT клиент запущен в отдельном потоке")
-    
+                self.logger.error(f"❌ MQTT client error: {e}")
+
+        threading.Thread(target=mqtt_thread, daemon=True).start()
+        self.logger.info("🚀 MQTT client started in a background thread")
+
     async def _process_mqtt_events(self):
-        """Обработка событий из MQTT очереди"""
+        """Consume real-time events queued by the MQTT thread."""
         while True:
             try:
-                # Получаем событие из очереди (с таймаутом)
                 event = await asyncio.wait_for(self.mqtt_event_queue.get(), timeout=1.0)
-                
+
                 event_id = event.get("id")
                 camera = event.get("camera")
                 object_type = event.get("label")
-                
-                # Проверяем, не обработано ли уже
+
                 if event_id in self.processed_events:
-                    self.logger.debug(f"⏭️ Событие {event_id} уже обработано, пропускаем")
+                    self.logger.debug(f"⏭️ {event_id} already handled, skipping")
                     continue
-                
-                # Помечаем как обрабатываемое сразу, чтобы не обработать дважды через API
+                # Claim immediately so the API poll can't double-send it
                 self.processed_events.add(event_id)
-                
-                self.logger.info(
-                    f"📨 Получено событие из MQTT: {object_type} на {camera} (ID: {event_id})"
-                )
-                
-                # Получаем полную информацию о событии из API (с повторными попытками)
+
+                self.logger.info(f"📨 Handling MQTT event: {object_type}@{camera} ({event_id})")
+
+                # Fetch the full event from the API (it may lag a few seconds)
                 full_event = None
-                for attempt in range(20):  # 20 попыток по 3 секунды = 60 секунд
-                    async with aiohttp.ClientSession() as session:
-                        try:
-                            async with session.get(f"{FRIGATE_URL}/api/events/{event_id}", timeout=10) as response:
-                                if response.status == 200:
-                                    full_event = await response.json()
-                                    self.logger.info(
-                                        f"✅ Событие {event_id} получено из API (попытка {attempt + 1})"
-                                    )
-                                    break
-                                elif response.status == 404:
-                                    # Событие еще не появилось в API, ждем
-                                    if attempt < 19:
-                                        await asyncio.sleep(3)
-                                    else:
-                                        self.logger.warning(
-                                            f"⚠️ Событие {event_id} не найдено в API после {attempt + 1} попыток"
-                                        )
-                                else:
-                                    self.logger.warning(
-                                        f"⚠️ HTTP {response.status} при получении события {event_id} (попытка {attempt + 1})"
-                                    )
-                                    if attempt < 19:
-                                        await asyncio.sleep(3)
-                        except Exception as e:
-                            self.logger.warning(
-                                f"⚠️ Ошибка при получении события {event_id} (попытка {attempt + 1}): {e}"
-                            )
-                            if attempt < 19:
-                                await asyncio.sleep(3)
-                
-                if full_event:
-                    has_snapshot = full_event.get("has_snapshot", False)
-                    has_clip = full_event.get("has_clip", False)
-                    
-                    if has_snapshot and has_clip:
-                        self.logger.info(
-                            f"✅ Событие {event_id} готово к обработке "
-                            f"(snapshot: {has_snapshot}, clip: {has_clip})"
-                        )
-                        await self._process_frigate_event(full_event, source="mqtt")
-                    else:
-                        # Добавляем в очередь повторной проверки
-                        self.retry_events[event_id] = (full_event, 0)
-                        self.logger.info(
-                            f"⏳ Событие {event_id} добавлено в очередь повторной проверки "
-                            f"(snapshot: {has_snapshot}, clip: {has_clip})"
-                        )
+                for attempt in range(1, 21):  # up to ~60s
+                    try:
+                        async with self.http.get(
+                            f"{FRIGATE_URL}/api/events/{event_id}",
+                            timeout=aiohttp.ClientTimeout(total=10),
+                        ) as response:
+                            if response.status == 200:
+                                full_event = await response.json()
+                                self.logger.debug(
+                                    f"✅ {event_id} fetched from API (attempt {attempt})"
+                                )
+                                break
+                            if response.status != 404:
+                                self.logger.debug(
+                                    f"⚠️ HTTP {response.status} fetching {event_id} "
+                                    f"(attempt {attempt})"
+                                )
+                    except Exception as e:
+                        self.logger.debug(f"⚠️ Error fetching {event_id} (attempt {attempt}): {e}")
+                    if attempt < 20:
+                        await asyncio.sleep(3)
                 else:
-                    # Если событие не получено из API, добавляем в очередь повторной проверки с исходными данными
-                    self.retry_events[event_id] = (event, 0)
-                    self.logger.info(
-                        f"⏳ Событие {event_id} добавлено в очередь повторной проверки "
-                        f"(не удалось получить из API)"
-                    )
+                    self.logger.warning(f"⚠️ {event_id} never appeared in the API")
+
+                if full_event and full_event.get("has_snapshot") and full_event.get("has_clip"):
+                    await self._process_frigate_event(full_event, source="mqtt")
+                else:
+                    # Media (or the event itself) not ready — let the poll loop retry
+                    self.retry_events[event_id] = (full_event or event, 0)
+                    self.logger.info(f"⏳ {event_id} queued for retry (media not ready)")
+
             except asyncio.TimeoutError:
-                # Таймаут - это нормально, продолжаем
-                continue
+                continue  # idle tick
             except Exception as e:
-                self.logger.error(f"❌ Ошибка обработки MQTT события: {e}")
-    
+                self.logger.error(f"❌ Error processing MQTT event: {e}")
+
+    # ------------------------------------------------------------------- main
+
     async def start_monitoring(self):
-        """Запуск мониторинга"""
-        self.logger.info(f"🚀 Запуск мониторинга Frigate ({self.group_config['name']})")
-        self.logger.info(f"📹 Камеры: {', '.join(self.cameras)}")
-        self.logger.info(f"🎯 Отслеживаемые объекты: {', '.join(self.objects)}")
-        
-        # Сохраняем event loop и создаем очередь
-        self.event_loop = asyncio.get_event_loop()
+        self.logger.info(f"🚀 Starting Frigate monitor ({self.group_config['name']})")
+        self.logger.info(f"📹 Cameras: {', '.join(self.cameras)}")
+        self.logger.info(f"🎯 Tracked objects: {', '.join(self.objects)}")
+
+        self.event_loop = asyncio.get_running_loop()
         self.mqtt_event_queue = asyncio.Queue()
-        
-        # Запускаем статистику
+        self.http = aiohttp.ClientSession()
+
         self._start_stats_timer()
-        
-        # Запускаем MQTT клиент для получения событий в реальном времени
         self._start_mqtt_client()
-        
-        # Запускаем обработку событий из MQTT
         mqtt_task = asyncio.create_task(self._process_mqtt_events())
-        
-        # Основной цикл проверки событий (для обработки событий из очереди повторной проверки)
+
         try:
             while True:
                 await self._check_frigate_events()
-                await asyncio.sleep(3)  # Проверяем каждые 3 секунды
-        except KeyboardInterrupt:
-            self.logger.info("🛑 Получен сигнал завершения")
-            mqtt_task.cancel()
+                await asyncio.sleep(POLL_INTERVAL)
         except Exception as e:
-            self.logger.error(f"❌ Критическая ошибка: {e}")
+            self.logger.error(f"❌ Fatal error: {e}")
+            raise
+        finally:
             mqtt_task.cancel()
+            await self.http.close()
+
 
 def main():
-    """Главная функция"""
     if len(sys.argv) != 2:
-        print("Использование: python frigate_telegram_monitor.py <group_id>")
-        print("Доступные группы:", list(GROUPS.keys()))
+        print("Usage: python frigate_telegram_monitor.py <group_id>")
+        print("Available groups:", list(GROUPS.keys()))
         sys.exit(1)
-    
+
     group_id = sys.argv[1]
-    
     if group_id not in GROUPS:
-        print(f"Ошибка: группа '{group_id}' не найдена")
-        print("Доступные группы:", list(GROUPS.keys()))
+        print(f"Error: group '{group_id}' not found")
+        print("Available groups:", list(GROUPS.keys()))
         sys.exit(1)
-    
-    # Создаем и запускаем монитор
+
     monitor = FrigateTelegramMonitor(group_id)
-    
     try:
         asyncio.run(monitor.start_monitoring())
     except KeyboardInterrupt:
-        print("\n🛑 Завершение работы...")
+        print("\n🛑 Shutting down...")
     except Exception as e:
-        print(f"❌ Критическая ошибка: {e}")
+        print(f"❌ Fatal error: {e}")
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

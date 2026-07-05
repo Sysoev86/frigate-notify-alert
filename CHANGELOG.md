@@ -3,6 +3,37 @@
 All notable changes. Format follows [Semantic Versioning](https://semver.org/):
 `MAJOR.MINOR.PATCH`.
 
+## [1.2.0] — 2026-07-05
+Code cleanup release. Default behavior is unchanged.
+
+### Fixed
+- **Config options now actually work.** `OBJECTS`, `LOG_LEVEL`, `LOG_FORMAT`,
+  `STATS_INTERVAL` and `MEDIA_RETRY_ATTEMPTS` were documented but silently ignored
+  (values were hardcoded). They are wired up now; missing options fall back to the
+  previous defaults, so old configs keep working.
+- **paho-mqtt 2.x compatibility.** Fresh installs pulled paho-mqtt 2.x, where
+  `mqtt.Client()` without a callback API version fails. A version shim keeps both
+  1.x and 2.x working.
+- **Media downloaded once, not twice.** The snapshot and clip were fetched from
+  Frigate to "check availability" and then re-downloaded for sending; now each file
+  is downloaded a single time and sent as-is.
+
+### Changed
+- **Much quieter logs.** Routine poll dumps (every event listed every 3 s) moved from
+  INFO to DEBUG — log files no longer grow by megabytes per hour. Set
+  `LOG_LEVEL = "DEBUG"` to get the verbose output back.
+- Log messages and code comments are in English (public repo).
+- One shared HTTP session per monitor instead of a new one per request.
+- `MEDIA_WAIT_TIME` (never used) replaced by `MEDIA_RETRY_DELAY` (seconds between
+  download retries, default 3 — same effective behavior).
+
+### Added
+- Per-group `objects` option: override the global `OBJECTS` list for one group
+  (e.g. `["person"]` for an indoor camera).
+- README: the Frigate example now explicitly recommends
+  `record.*.retain.mode: active_objects` (with `motion`, a motion mask can silently
+  drop clips — the "photo but no video" trap).
+
 ## [1.1.1] — 2026-07-05
 ### Added
 - **Diagnostic logging** per event: source (`mqtt` / `api-poll` / `api-retry`), event

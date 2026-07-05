@@ -48,6 +48,8 @@ TELEGRAM_PROXY_URL = None
 #                       (handy to ignore passers-by). Omit / empty list = notify
 #                       for the whole camera. Zone names come from Frigate:
 #                       config.yml -> cameras.<camera>.zones.
+#    objects          — OPTIONAL. Override the global OBJECTS list for this
+#                       group only (e.g. ["person"] for an indoor camera).
 #    mute_controls    — OPTIONAL. True (default) = pause buttons appear in the
 #                       chat (15m/1h/3h/until morning). False = no buttons.
 #                       Requires the mute_controller service (see README).
@@ -122,8 +124,8 @@ OBJECTS = ["person", "car", "truck", "bus", "motorcycle", "bicycle"]
 #  6. INTERFACE / MISC — usually no need to change
 # ---------------------------------------------------------------------------
 LANG = "en"                # pause-controller language: "en" or "ru"
-LOG_LEVEL = "INFO"         # log level (INFO / DEBUG)
+LOG_LEVEL = "INFO"         # log level (INFO / DEBUG; DEBUG shows every poll)
 LOG_FORMAT = "%(asctime)s - %(levelname)s - %(message)s"
 STATS_INTERVAL = 60        # how often (seconds) to write stats to the log
-MEDIA_WAIT_TIME = 25       # seconds to wait for media files to be ready
 MEDIA_RETRY_ATTEMPTS = 15  # how many times to retry downloading photo/video
+MEDIA_RETRY_DELAY = 3      # seconds between download retries
