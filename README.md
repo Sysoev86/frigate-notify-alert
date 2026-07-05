@@ -159,6 +159,7 @@ GROUPS = {
     "group2": {
         "telegram_chat_id": "-1009876543210",
         "cameras": ["entrance"],
+        "silent": False,              # optional: loud notifications (default True = silent)
         "name": "Entrance",
     },
 }

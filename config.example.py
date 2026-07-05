@@ -74,6 +74,7 @@ GROUPS = {
         "telegram_chat_id": "SET_ME_CHAT_ID_1",   # chat for the first group
         "cameras": ["yard"],                       # <- your camera names
         # "zones": ["zone_yard"],                  # <- uncomment to notify only by zone
+        # "silent": False,                         # <- False = loud notifications (default: silent)
         "mute_controls": True,                     # pause buttons in the chat
         "name": "Group 1 (yard)",
     },
