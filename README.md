@@ -26,7 +26,7 @@ own chat), optional zone filtering, and in‑chat pause buttons — all in Teleg
 - [Versioning](#versioning) · [License](#license)
 
 ## Features
-- 📸 Photo + video of the event in Telegram (as a media group, silent).
+- 📸 Photo + video of the event in Telegram (media group; silent by default, `silent: False` for loud).
 - 📹 Multiple camera groups — each to its own chat.
 - 🧭 Zone filtering (`zones`) — notify only when the object enters a chosen Frigate zone.
 - ⏸ Pause buttons in the chat (15 min / 1 h / 3 h / until morning) — per group.
@@ -203,6 +203,7 @@ A group = a set of cameras + one chat. You can have any number of groups
 | `cameras` | yes | Camera names **exactly as in Frigate** (case‑sensitive). |
 | `zones` | no | Frigate zone names. If set, notify only when the object entered one of these zones. Omit / empty = notify for the whole camera. |
 | `objects` | no | Override the global `OBJECTS` list for this group only (e.g. `["person"]` for an indoor camera). |
+| `silent` | no | `True` (default) → messages arrive silently (no sound/vibration). `False` → full loud notifications. |
 | `mute_controls` | no | `True` (default, even if omitted) → pause buttons appear in the chat. `False` → no buttons for this group. |
 | `name` | no | Free‑form label, only used in logs. |
 

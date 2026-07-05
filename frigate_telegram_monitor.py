@@ -97,6 +97,10 @@ class FrigateTelegramMonitor:
         self.cameras = self.group_config["cameras"]
         self.objects = list(self.group_config.get("objects") or OBJECTS)
 
+        # Silent delivery (no sound/vibration on the phone). Default True —
+        # set "silent": False on a group to get full loud notifications.
+        self.silent = bool(self.group_config.get("silent", True))
+
         # Optional Frigate zone filter: if set, notify only when the object
         # entered at least one of these zones. Empty/missing = whole camera.
         self.zones = self.group_config.get("zones") or []
@@ -431,7 +435,7 @@ class FrigateTelegramMonitor:
             await self.bot.send_media_group(
                 chat_id=self.group_config["telegram_chat_id"],
                 media=[InputMediaPhoto(media=photo_data), InputMediaVideo(media=video_data)],
-                disable_notification=True,
+                disable_notification=self.silent,
             )
             self.logger.info("✅ Media group sent")
             return True

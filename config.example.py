@@ -50,6 +50,8 @@ TELEGRAM_PROXY_URL = None
 #                       config.yml -> cameras.<camera>.zones.
 #    objects          — OPTIONAL. Override the global OBJECTS list for this
 #                       group only (e.g. ["person"] for an indoor camera).
+#    silent           — OPTIONAL. True (default) = messages arrive silently
+#                       (no sound/vibration). False = full loud notifications.
 #    mute_controls    — OPTIONAL. True (default) = pause buttons appear in the
 #                       chat (15m/1h/3h/until morning). False = no buttons.
 #                       Requires the mute_controller service (see README).
