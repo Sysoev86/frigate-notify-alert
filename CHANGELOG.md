@@ -5,6 +5,18 @@
 All notable changes. Format follows [Semantic Versioning](https://semver.org/):
 `MAJOR.MINOR.PATCH`.
 
+## [1.3.2] — 2026-07-05
+### Added
+- **`manage.sh doctor`** — one-command self-diagnosis of the whole chain: config
+  placeholders, Frigate API reachability, camera/zone names (with typo hints),
+  snapshots/record per camera, media on recent events, MQTT auth, Telegram token &
+  chat access, service status.
+- **Startup notice**: each monitor sends one silent "monitoring started" message to
+  its chat (cameras, objects, zones, version) — a built-in bot/chat wiring test on
+  every start. Disable per group with `"startup_message": False`.
+- **Config validation on start**: clear "what exactly is wrong" errors (placeholders,
+  missing fields) instead of tracebacks, in both the monitor and the pause controller.
+
 ## [1.3.1] — 2026-07-05
 ### Added
 - Per-group `silent` option: `True` (default) keeps the current silent delivery,

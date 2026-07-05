@@ -129,6 +129,11 @@ case "${1:-}" in
         echo "🎯 Starting monitor for group: $GROUP (Ctrl+C to stop)"
         exec ./venv/bin/python frigate_telegram_monitor.py "$GROUP"
         ;;
+    doctor)
+        # Self-diagnosis: config, Frigate API, cameras/zones, MQTT, Telegram, services
+        install_deps
+        exec ./venv/bin/python doctor.py
+        ;;
     start)
         need_systemd; need_root start
         echo "🚀 Starting: groups [$GROUPS_LIST] + pause controller"
@@ -213,12 +218,13 @@ case "${1:-}" in
     *)
         echo "🔧 frigate-notify-alert service management"
         echo ""
-        echo "Usage: $0 {setup|run|install|start|stop|restart|status|logs|enable|disable|update|version}"
+        echo "Usage: $0 {setup|run|doctor|install|start|stop|restart|status|logs|enable|disable|update|version}"
         echo ""
         echo "Groups (from config.py): $GROUPS_LIST"
         echo ""
         echo "  setup    - first-time install: dependencies + systemd units + start (sudo)"
         echo "  run      - manual foreground run without systemd: $0 run [group]"
+        echo "  doctor   - check the whole chain: config, Frigate, cameras/zones, MQTT, Telegram"
         echo "  install  - install units and enable autostart (reads groups from config.py)"
         echo "  update   - git pull + reinstall units + restart (get the latest version)"
         echo "  version  - show local version and the latest tag on origin"

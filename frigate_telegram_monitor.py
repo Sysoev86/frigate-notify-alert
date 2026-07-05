@@ -57,10 +57,53 @@ MEDIA_RETRY_ATTEMPTS = int(globals().get("MEDIA_RETRY_ATTEMPTS") or 15)
 MEDIA_RETRY_DELAY = int(globals().get("MEDIA_RETRY_DELAY") or 3)
 # Shared pause-state file written by mute_controller, read by the monitors.
 MUTE_STATE_FILE = globals().get("MUTE_STATE_FILE") or os.path.join(_SCRIPT_DIR, "mute_state.json")
+# Language of chat-facing texts (startup notice); logs are always English.
+LANG = str(globals().get("LANG") or "en").lower()
+if LANG not in ("en", "ru"):
+    LANG = "en"
+
+
+def _version() -> str:
+    try:
+        return open(os.path.join(_SCRIPT_DIR, "VERSION")).read().strip()
+    except OSError:
+        return "?"
+
 
 POLL_INTERVAL = 3          # seconds between /api/events polls
 MIN_MEDIA_BYTES = 1000     # smaller responses are treated as "not ready yet"
 QUEUE_MAX_RETRIES = 10     # polls to wait for media before dropping an event
+
+
+def config_errors() -> list:
+    """Static config validation for a clear startup error instead of a traceback.
+    (Deep checks — camera/zone names, MQTT auth, chat access — live in doctor.py.)"""
+    errors = []
+
+    def placeholder(v):
+        return isinstance(v, str) and ("SET_ME" in v or "ВСТАВЬ" in v)
+
+    groups = globals().get("GROUPS")
+    if not isinstance(groups, dict) or not groups:
+        errors.append("GROUPS is missing or empty")
+        return errors
+
+    for name in ("TELEGRAM_BOT_TOKEN", "MQTT_BROKER_HOST", "MQTT_USERNAME",
+                 "MQTT_PASSWORD", "FRIGATE_URL"):
+        v = globals().get(name)
+        if not v or placeholder(v):
+            errors.append(f"{name} is not filled in (placeholder left)")
+
+    for gid, g in groups.items():
+        if not isinstance(g, dict):
+            errors.append(f"GROUPS['{gid}'] must be a dict")
+            continue
+        cid = str(g.get("telegram_chat_id") or "")
+        if not cid or placeholder(cid):
+            errors.append(f"GROUPS['{gid}'].telegram_chat_id is not filled in")
+        if not g.get("cameras"):
+            errors.append(f"GROUPS['{gid}'].cameras is empty")
+    return errors
 
 
 class FrigateTelegramMonitor:
@@ -100,6 +143,10 @@ class FrigateTelegramMonitor:
         # Silent delivery (no sound/vibration on the phone). Default True —
         # set "silent": False on a group to get full loud notifications.
         self.silent = bool(self.group_config.get("silent", True))
+
+        # One quiet "monitoring started" message on each start — doubles as a
+        # built-in bot/chat wiring test. Disable with "startup_message": False.
+        self.startup_message = bool(self.group_config.get("startup_message", True))
 
         # Optional Frigate zone filter: if set, notify only when the object
         # entered at least one of these zones. Empty/missing = whole camera.
@@ -429,6 +476,30 @@ class FrigateTelegramMonitor:
                           f"after {MEDIA_RETRY_ATTEMPTS} attempts")
         return False
 
+    async def _send_startup_notice(self):
+        """Silent one-liner on start: proves the bot can post to this chat and
+        shows what this group is watching."""
+        name = self.group_config.get("name", self.group_id)
+        zones = ", ".join(self.zones) if self.zones else ("all" if LANG == "en" else "все")
+        if LANG == "ru":
+            text = (f"🚀 Мониторинг запущен: «{name}» (v{_version()})\n"
+                    f"📹 Камеры: {', '.join(self.cameras)}\n"
+                    f"🎯 Объекты: {', '.join(self.objects)} | 🧭 Зоны: {zones}")
+        else:
+            text = (f"🚀 Monitoring started: “{name}” (v{_version()})\n"
+                    f"📹 Cameras: {', '.join(self.cameras)}\n"
+                    f"🎯 Objects: {', '.join(self.objects)} | 🧭 Zones: {zones}")
+        try:
+            await self.bot.send_message(
+                chat_id=self.group_config["telegram_chat_id"],
+                text=text,
+                disable_notification=True,
+            )
+            self.logger.info("📨 Startup notice sent")
+        except TelegramError as e:
+            self.logger.error(f"❌ Startup notice failed: {e} — check the bot token "
+                              f"and that the bot is a member of the chat")
+
     async def _send_media_group(self, photo_data: bytes, video_data: bytes) -> bool:
         """Send photo + video to the group's chat as one silent media group."""
         try:
@@ -600,6 +671,9 @@ class FrigateTelegramMonitor:
         self.mqtt_event_queue = asyncio.Queue()
         self.http = aiohttp.ClientSession()
 
+        if self.startup_message:
+            await self._send_startup_notice()
+
         self._start_stats_timer()
         self._start_mqtt_client()
         mqtt_task = asyncio.create_task(self._process_mqtt_events())
@@ -617,6 +691,14 @@ class FrigateTelegramMonitor:
 
 
 def main():
+    errs = config_errors()
+    if errs:
+        print("❌ config.py has problems:")
+        for e in errs:
+            print(f"   - {e}")
+        print("Fix config.py (see config.example.py) or run: ./manage.sh doctor")
+        sys.exit(1)
+
     if len(sys.argv) != 2:
         print("Usage: python frigate_telegram_monitor.py <group_id>")
         print("Available groups:", list(GROUPS.keys()))

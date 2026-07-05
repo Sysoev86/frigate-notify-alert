@@ -52,6 +52,9 @@ TELEGRAM_PROXY_URL = None
 #                       group only (e.g. ["person"] for an indoor camera).
 #    silent           — OPTIONAL. True (default) = messages arrive silently
 #                       (no sound/vibration). False = full loud notifications.
+#    startup_message  — OPTIONAL. True (default) = one quiet "monitoring
+#                       started" message on each start (built-in wiring test).
+#                       False = off.
 #    mute_controls    — OPTIONAL. True (default) = pause buttons appear in the
 #                       chat (15m/1h/3h/until morning). False = no buttons.
 #                       Requires the mute_controller service (see README).

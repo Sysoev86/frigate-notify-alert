@@ -205,6 +205,7 @@ A group = a set of cameras + one chat. You can have any number of groups
 | `zones` | no | Frigate zone names. If set, notify only when the object entered one of these zones. Omit / empty = notify for the whole camera. |
 | `objects` | no | Override the global `OBJECTS` list for this group only (e.g. `["person"]` for an indoor camera). |
 | `silent` | no | `True` (default) → messages arrive silently (no sound/vibration). `False` → full loud notifications. |
+| `startup_message` | no | `True` (default) → one quiet "monitoring started" message on each start (built-in wiring test: cameras, objects, zones, version). `False` → off. |
 | `mute_controls` | no | `True` (default, even if omitted) → pause buttons appear in the chat. `False` → no buttons for this group. |
 | `name` | no | Free‑form label, only used in logs. |
 
@@ -265,6 +266,7 @@ need `sudo`.
 |---|---|
 | `setup` | First-time install: dependencies + systemd units + start. The only command a fresh install needs. |
 | `run [group]` | Manual foreground run without systemd (auto-picks the group if there's only one). |
+| `doctor` | Self-diagnosis of the whole chain: config placeholders, Frigate API, camera/zone names (with typo hints), snapshots/record per camera, media on recent events, MQTT auth, Telegram token & chat access, service status. |
 | `install` | (Re)installs systemd units (one per group from `config.py`), enables autostart. |
 | `start` / `stop` / `restart` | Control all services. Use `restart` after editing `config.py`. |
 | `status` | Status of each group + the controller. |
@@ -282,6 +284,8 @@ controller (`mute_controller.py`) is a separate process: it listens for button t
 writes `mute_state.json`, which the monitors read before sending.
 
 ## Troubleshooting
+- **Start with `./manage.sh doctor`** — it checks the whole chain (config, Frigate API,
+  camera/zone names, media on recent events, MQTT, Telegram) and points at the broken link.
 - Services won't start → `./manage.sh status`, `journalctl -u 'frigate-telegram@*' -e`.
 - No notifications → confirm events exist in Frigate; check `./manage.sh logs`.
 - `config.py not found` → run `cp config.example.py config.py`.

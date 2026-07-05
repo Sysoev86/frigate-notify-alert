@@ -326,7 +326,35 @@ class MuteController:
                     log.error(f"❌ Error handling button press: {e}")
 
 
+def config_errors() -> list:
+    """Static config validation (clear startup error instead of a traceback)."""
+    errors = []
+
+    def placeholder(v):
+        return isinstance(v, str) and ("SET_ME" in v or "ВСТАВЬ" in v)
+
+    groups = globals().get("GROUPS")
+    if not isinstance(groups, dict) or not groups:
+        return ["GROUPS is missing or empty"]
+    token = globals().get("TELEGRAM_BOT_TOKEN")
+    if not token or placeholder(token):
+        errors.append("TELEGRAM_BOT_TOKEN is not filled in (placeholder left)")
+    for gid, g in groups.items():
+        cid = str((g or {}).get("telegram_chat_id") or "")
+        if not cid or placeholder(cid):
+            errors.append(f"GROUPS['{gid}'].telegram_chat_id is not filled in")
+    return errors
+
+
 def main():
+    errs = config_errors()
+    if errs:
+        print("❌ config.py has problems:")
+        for e in errs:
+            print(f"   - {e}")
+        print("Fix config.py (see config.example.py) or run: ./manage.sh doctor")
+        sys.exit(1)
+
     controller = MuteController()
     try:
         asyncio.run(controller.run())
