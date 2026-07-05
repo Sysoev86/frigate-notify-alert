@@ -32,7 +32,7 @@ try:
     from config import *
 except ModuleNotFoundError as _e:
     if getattr(_e, "name", "") == "config":
-        print("❌ Не найден config.py. Скопируй пример и заполни его:")
+        print("config.py not found. Copy the example and fill it in:")
         print("   cp config.example.py config.py")
         raise SystemExit(1)
     raise

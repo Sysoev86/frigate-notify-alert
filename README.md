@@ -1,321 +1,301 @@
 # frigate-notify-alert
 
-Уведомления **Frigate → Telegram**: при обнаружении человека/машины бот присылает
-фото + видео события в чат. Несколько групп камер (каждая в свой чат), фильтр по
-зонам и кнопки паузы уведомлений прямо в Telegram.
+**🇷🇺 Русская версия:** [README.ru.md](README.ru.md)
+
+**Frigate → Telegram** notifications: when Frigate detects a person or car, the bot
+sends the event's **photo + video** to your chat. Multiple camera groups (each to its
+own chat), optional zone filtering, and in‑chat pause buttons — all in Telegram.
 
 <p align="center">
-  <img src="docs/telegram-example.jpg" alt="Пример уведомлений Frigate в Telegram: снапшот с рамкой детекции + видеоклип" width="300">
-  <br><sub>Так это выглядит в чате: на каждое событие — фото с рамкой детекции и видеоклип.</sub>
+  <img src="docs/telegram-example.jpg" alt="Example: Frigate detection snapshot with bounding box + video clip in a Telegram chat" width="300">
+  <br><sub>How it looks in the chat: for each event — a snapshot with a detection box and a video clip.</sub>
 </p>
 
-## Содержание
-- [Возможности](#возможности)
-- [Требования](#требования)
-- [Настройка Frigate (обязательно)](#настройка-frigate-обязательно)
-- [Установка](#установка)
-- [Конфигурация (`config.py`) — подробно](#конфигурация-configpy--подробно)
-- [Обновление](#обновление-до-последней-версии)
-- [Несколько групп / масштабирование](#несколько-групп--масштабирование)
-- [Пауза уведомлений](#пауза-уведомлений)
-- [Управление](#управление)
-- [Как это работает](#как-это-работает)
-- [Диагностика](#диагностика)
-- [Версии](#версии) · [Лицензия](#лицензия)
+## Contents
+- [Features](#features)
+- [Requirements](#requirements)
+- [Frigate setup (required)](#frigate-setup-required)
+- [Installation](#installation)
+- [Configuration (`config.py`) in detail](#configuration-configpy-in-detail)
+- [Updating](#updating)
+- [Multiple groups / scaling](#multiple-groups--scaling)
+- [Pause notifications](#pause-notifications)
+- [Language](#language)
+- [Management](#management)
+- [How it works](#how-it-works)
+- [Troubleshooting](#troubleshooting)
+- [Versioning](#versioning) · [License](#license)
 
-## Возможности
-- 📸 Фото + видео события в Telegram (медиа-группой, беззвучно).
-- 📹 Несколько групп камер — каждая в свой чат.
-- 🧭 Фильтр по зонам Frigate (`zones`) — слать только когда объект в нужной зоне.
-- ⏸ Пауза уведомлений кнопками в чате (15 мин / 1 час / 3 часа / до утра) — по группе.
-- ➕ Масштабирование на любое число групп через шаблонный systemd-юнит.
-- 🌐 Прокси для Telegram (обход блокировок).
+## Features
+- 📸 Photo + video of the event in Telegram (as a media group, silent).
+- 📹 Multiple camera groups — each to its own chat.
+- 🧭 Zone filtering (`zones`) — notify only when the object enters a chosen Frigate zone.
+- ⏸ Pause buttons in the chat (15 min / 1 h / 3 h / until morning) — per group.
+- ➕ Scales to any number of groups via a templated systemd unit.
+- 🌐 Optional proxy for Telegram (to bypass ISP blocking).
+- 🇬🇧🇷🇺 Interface language `en` / `ru`.
 
-## Требования
-- Работающий **Frigate** с включённым **MQTT**.
-- **Telegram-бот** (создать у [@BotFather](https://t.me/BotFather)) и ID чата.
-- **Python 3.9+**, Linux с systemd (для автозапуска).
+## Requirements
+- A working **Frigate** install with **MQTT** enabled.
+- A **Telegram bot** (create via [@BotFather](https://t.me/BotFather)) and a chat ID.
+- **Python 3.9+**, Linux with systemd (for autostart).
 
-## Настройка Frigate (обязательно)
+## Frigate setup (required)
 
-Скрипт ничего не «видит» сам — он берёт события и медиа у Frigate. Чтобы уведомления
-приходили с **фото и видео**, во Frigate должны быть включены **три** вещи:
+The script gets events and media from Frigate. For notifications to arrive **with photo
+and video**, Frigate needs **three** things enabled:
 
-| Что | Зачем | Без этого |
+| What | Why | Without it |
 |---|---|---|
-| **MQTT** | через него скрипт узнаёт о событиях (`frigate/events`) | уведомлений не будет вообще |
-| **Snapshots** | даёт фото события (`has_snapshot`) | не будет фото |
-| **Record (записи)** | даёт видео-клип события (`has_clip`) | не будет видео |
+| **MQTT** | the script learns about events via `frigate/events` | no notifications at all |
+| **Snapshots** | provides the event photo (`has_snapshot`) | no photo |
+| **Record** | provides the event video clip (`has_clip`) | no video |
 
-Плюс объекты в `objects.track` должны пересекаться с `OBJECTS` из `config.py`, а зоны
-(если хочешь фильтр `zones`) — заданы у камер.
+Also, the objects in `objects.track` must overlap with `OBJECTS` in `config.py`, and
+zones (if you want the `zones` filter) must be defined on the cameras.
 
-### Минимальный пример `config.yml` Frigate (версия 0.14+)
+### Minimal Frigate `config.yml` (version 0.14+)
 ```yaml
 mqtt:
   enabled: true
-  host: 192.168.1.50          # тот же адрес/логин/пароль пойдёт в MQTT_* в config.py
+  host: 192.168.1.50          # same host/user/password go into MQTT_* in config.py
   user: frigate
-  password: секрет
+  password: secret
 
 detectors:
-  # твой детектор — coral / cpu / openvino и т.д.
+  # your detector — coral / cpu / openvino / etc.
   cpu1:
     type: cpu
 
 objects:
   track:
     - person
-    - car                     # должно пересекаться с OBJECTS в config.py
+    - car                     # must overlap with OBJECTS in config.py
 
-# Фото событий — нужно для фото в уведомлении
+# Snapshots — needed for the photo in the notification
 snapshots:
   enabled: true
   retain:
-    default: 14               # дней хранить снимки
+    default: 14               # days to keep snapshots
 
-# Записи — нужно для видео-клипа в уведомлении (Frigate 0.14+)
+# Recordings — needed for the video clip (Frigate 0.14+)
 record:
   enabled: true
   alerts:
     retain:
       days: 14
-      # mode: active_objects   # опционально: active_objects | motion | all
+      # mode: active_objects   # optional: active_objects | motion | all
   detections:
     retain:
       days: 14
 
 cameras:
-  dvor:                       # ← это имя пойдёт в "cameras": [...] в config.py
+  yard:                       # ← this name goes into "cameras": [...] in config.py
     ffmpeg:
       inputs:
-        - path: rtsp://ЛОГИН:ПАРОЛЬ@IP_КАМЕРЫ:554/stream
+        - path: rtsp://LOGIN:PASSWORD@CAMERA_IP:554/stream
           roles: [detect, record]
     detect:
       enabled: true
-    zones:                    # опционально — для фильтра "zones" в config.py
-      zone_dvor:              # ← это имя пойдёт в "zones": [...] в config.py
+    zones:                    # optional — for the "zones" filter in config.py
+      zone_yard:              # ← this name goes into "zones": [...] in config.py
         coordinates: 0.1,0.9,0.9,0.9,0.9,0.1,0.1,0.1
 ```
 
-`snapshots`, `record` и `objects.track` можно задавать **глобально** (как выше) **или
-отдельно у каждой камеры** — важно не «где написано», а **итоговое (эффективное)**
-значение у камеры. Рабочий пример: `snapshots` глобально `false`, но включены у нужных
-камер — этого достаточно, фото приходят. То же с `objects.track`: можно глобально
-`[person]`, а на отдельной камере расширить до `[person, car]`.
+`snapshots`, `record` and `objects.track` can be set **globally** (as above) **or
+per‑camera** — what matters is the **effective** value on the camera (e.g. global
+`snapshots: false` but enabled on specific cameras is enough).
 
-> **Версии Frigate.** Пример — для 0.14+ (проверено на **0.17**), где хранение записей
-> задаётся в `record.alerts` / `record.detections` (поле `mode` необязательное). В старой
-> 0.13 это было `record.events.retain`.
-> Официальная документация: [snapshots](https://docs.frigate.video/configuration/snapshots),
+> **Frigate versions.** The example targets 0.14+ (tested on **0.17**), where recording
+> retention lives under `record.alerts` / `record.detections` (the `mode` field is
+> optional). On older 0.13 it was `record.events.retain`. Docs:
+> [snapshots](https://docs.frigate.video/configuration/snapshots),
 > [record](https://docs.frigate.video/configuration/record),
 > [objects](https://docs.frigate.video/configuration/objects),
 > [zones](https://docs.frigate.video/configuration/zones).
 
-### Проверка, что всё готово
-После правки конфига **перезапусти Frigate**. У завершённого события должны быть
-`has_snapshot: true` и `has_clip: true` — это видно в UI Frigate (Explore) или через API:
+### Verify it's ready
+After editing the config, **restart Frigate**. A finished event should have
+`has_snapshot: true` and `has_clip: true` — visible in the Frigate UI (Explore) or the API:
 ```bash
-curl http://IP_FRIGATE:5000/api/events | python3 -m json.tool | grep -E "has_snapshot|has_clip"
+curl http://FRIGATE_IP:5000/api/events | python3 -m json.tool | grep -E "has_snapshot|has_clip"
 ```
-Если `has_clip` всегда `false` — не включён/не хранится `record`; если `has_snapshot`
-`false` — не включён `snapshots`.
+If `has_clip` is always `false`, `record` isn't enabled/retained; if `has_snapshot` is
+`false`, `snapshots` isn't enabled.
 
-## Установка
+## Installation
 ```bash
 git clone https://github.com/Sysoev86/frigate-notify-alert.git
 cd frigate-notify-alert
 
-cp config.example.py config.py     # свой конфиг (в .gitignore, в репо не попадёт)
-nano config.py                     # заполнить (см. подробный разбор ниже)
+cp config.example.py config.py     # your config (gitignored, never committed)
+nano config.py                     # fill it in (see details below)
 
-./install_deps.sh                  # venv + зависимости
-sudo ./manage.sh install           # поставить юниты (по группам из config.py) + пульт
+./install_deps.sh                  # venv + dependencies
+sudo ./manage.sh install           # install units (one per group from config.py) + pause controller
 sudo ./manage.sh start
 ./manage.sh status
 ```
-Ручной запуск без systemd: `./run_monitor.sh`. Проверить версию: `./manage.sh version`.
+Manual run without systemd: `./run_monitor.sh`. Check version: `./manage.sh version`.
 
----
+## Configuration (`config.py`) in detail
 
-## Конфигурация (`config.py`) — подробно
+`config.py` is the only file you edit. Anything written in UPPERCASE like `"SET_ME_..."`
+is a placeholder to replace. Quotes around strings are required (this is Python); numbers
+(ports) have no quotes.
 
-`config.py` — единственный файл, который нужно править. Сами скрипты трогать не надо.
-Всё, что в примере написано КАПСОМ (`"ВСТАВЬ_..."`), — заглушки, их надо заменить.
-Кавычки вокруг строк обязательны (это Python); числа (порт) — без кавычек.
-
-### Полный пример
+### Full example
 ```python
-# 1. TELEGRAM ---------------------------------------------------------------
+# 1. TELEGRAM --------------------------------------------------------------
 TELEGRAM_BOT_TOKEN = "1234567890:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-TELEGRAM_PROXY_URL = None            # или "http://ЛОГИН:ПАРОЛЬ@IP:ПОРТ"
+TELEGRAM_PROXY_URL = None            # or "http://LOGIN:PASSWORD@IP:PORT"
 
-# 2. ГРУППЫ КАМЕР -----------------------------------------------------------
+# 2. CAMERA GROUPS ---------------------------------------------------------
 GROUPS = {
     "group1": {
         "telegram_chat_id": "-1001234567890",
-        "cameras": ["dvor", "vorota"],
-        "zones": ["zone_dvor"],       # необязательно
-        "mute_controls": True,        # необязательно
-        "name": "Двор",
+        "cameras": ["yard", "gate"],
+        "zones": ["zone_yard"],       # optional
+        "mute_controls": True,        # optional
+        "name": "Yard",
     },
     "group2": {
         "telegram_chat_id": "-1009876543210",
-        "cameras": ["vhod"],
-        "name": "Вход",
+        "cameras": ["entrance"],
+        "name": "Entrance",
     },
 }
 
-# 3. MQTT (из настроек Frigate) --------------------------------------------
+# 3. MQTT (from your Frigate settings) -------------------------------------
 MQTT_BROKER_HOST = "192.168.1.50"
 MQTT_BROKER_PORT = 1883
 MQTT_USERNAME = "frigate"
-MQTT_PASSWORD = "секрет"
+MQTT_PASSWORD = "secret"
 MQTT_TOPIC_PREFIX = "frigate"
 
-# 4. FRIGATE ----------------------------------------------------------------
+# 4. FRIGATE ---------------------------------------------------------------
 FRIGATE_URL = "http://192.168.1.50:5000"
 
-# 5. ОБЪЕКТЫ ----------------------------------------------------------------
+# 5. OBJECTS ---------------------------------------------------------------
 OBJECTS = ["person", "car", "truck", "bus", "motorcycle", "bicycle"]
 
-# 6. ПРОЧЕЕ (обычно менять не нужно) ---------------------------------------
+# 6. MISC / UI -------------------------------------------------------------
+LANG = "en"                          # interface language of the pause controller: "en" or "ru"
 LOG_LEVEL = "INFO"
-LOG_FORMAT = "%(asctime)s - %(levelname)s - %(message)s"
 STATS_INTERVAL = 60
 MEDIA_WAIT_TIME = 25
 MEDIA_RETRY_ATTEMPTS = 15
 ```
 
-### Разбор по полям
+### Field reference
 
 #### Telegram
-| Параметр | Обязательно | Описание |
+| Field | Required | Description |
 |---|:---:|---|
-| `TELEGRAM_BOT_TOKEN` | да | Токен бота от [@BotFather](https://t.me/BotFather): `/newbot` → имя → username → строка вида `1234567890:AA...`. Вставить целиком. |
-| `TELEGRAM_PROXY_URL` | нет | `None` = без прокси (обычный случай). Нужен, только если Telegram заблокирован у провайдера. Формат `"http://ЛОГИН:ПАРОЛЬ@IP:ПОРТ"`. |
+| `TELEGRAM_BOT_TOKEN` | yes | Bot token from [@BotFather](https://t.me/BotFather): `/newbot` → name → username → a string like `1234567890:AA...`. |
+| `TELEGRAM_PROXY_URL` | no | `None` = no proxy (the usual case). Needed only if Telegram is blocked by your ISP. Format `"http://LOGIN:PASSWORD@IP:PORT"`. |
 
-#### `GROUPS` — группы камер
-Группа = набор камер + один чат, куда идут уведомления по этим камерам. Групп может
-быть сколько угодно (`group1`, `group2`, `group3`…). Ключ группы (`group1`) — это ещё
-и имя systemd-сервиса: `frigate-telegram@group1`.
+#### `GROUPS` — camera groups
+A group = a set of cameras + one chat. You can have any number of groups
+(`group1`, `group2`, …). The group key (`group1`) is also the systemd service name:
+`frigate-telegram@group1`.
 
-| Ключ группы | Обязательно | Описание |
+| Key | Required | Description |
 |---|:---:|---|
-| `telegram_chat_id` | да | Куда слать. Для групп/каналов начинается с `-100…`. См. «как узнать» ниже. |
-| `cameras` | да | Список имён камер **ровно как в Frigate** (регистр важен). |
-| `zones` | нет | Список зон Frigate. Задан → шлём только если объект зашёл в одну из зон. Нет ключа / пустой список → шлём по всей камере. |
-| `mute_controls` | нет | `True` (по умолчанию, даже если ключ не писать) → в чате есть кнопки паузы. `False` → без кнопок для этой группы. |
-| `name` | нет | Произвольное название, попадает только в логи. |
+| `telegram_chat_id` | yes | Where to send. For groups/channels it starts with `-100…`. See "how to find" below. |
+| `cameras` | yes | Camera names **exactly as in Frigate** (case‑sensitive). |
+| `zones` | no | Frigate zone names. If set, notify only when the object entered one of these zones. Omit / empty = notify for the whole camera. |
+| `mute_controls` | no | `True` (default, even if omitted) → pause buttons appear in the chat. `False` → no buttons for this group. |
+| `name` | no | Free‑form label, only used in logs. |
 
-**Как узнать `telegram_chat_id`:**
-- Личка: напиши боту [@userinfobot](https://t.me/userinfobot) — покажет твой numeric id.
-- Группа/канал: добавь **своего** бота в чат, затем напиши там [@getidsbot](https://t.me/getidsbot). ID группы обычно `-100…`.
-- ⚠️ Бот должен быть **участником** чата, иначе не сможет туда писать.
+**How to find `telegram_chat_id`:**
+- DM: message [@userinfobot](https://t.me/userinfobot) — it shows your numeric id.
+- Group/channel: add **your** bot to the chat, then message [@getidsbot](https://t.me/getidsbot). Group IDs are usually `-100…`.
+- ⚠️ The bot must be a **member** of the chat, otherwise it can't post there.
 
-**Как узнать имена камер (`cameras`):** это ключи из `config.yml` Frigate, раздел `cameras:`.
-```yaml
-cameras:
-  dvor:        # <- вписывай "dvor"
-  vhod:        # <- вписывай "vhod"
-```
+**How to find camera names (`cameras`):** the keys under `cameras:` in Frigate's `config.yml`.
 
-**Как узнать зоны (`zones`):** ключи из `cameras.<камера>.zones` в `config.yml` Frigate.
-```yaml
-cameras:
-  dvor:
-    zones:
-      zone_dvor:   # <- вписывай "zone_dvor"
-```
-Если у камеры зон нет — просто не указывай `zones`, будут ловиться любые объекты на камере.
+**How to find zones (`zones`):** the keys under `cameras.<camera>.zones` in Frigate's `config.yml`.
 
-#### MQTT (берётся из настроек Frigate, раздел `mqtt:`)
-| Параметр | По умолч. | Описание |
+#### MQTT (from Frigate's `mqtt:` section)
+| Field | Default | Description |
 |---|---|---|
-| `MQTT_BROKER_HOST` | — | IP брокера MQTT (обычно там же, где Frigate). |
-| `MQTT_BROKER_PORT` | `1883` | Стандартный порт MQTT. |
-| `MQTT_USERNAME` / `MQTT_PASSWORD` | — | Логин/пароль из `mqtt:` в конфиге Frigate. |
-| `MQTT_TOPIC_PREFIX` | `"frigate"` | Префикс топиков Frigate. |
+| `MQTT_BROKER_HOST` | — | MQTT broker IP (usually the same host as Frigate). |
+| `MQTT_BROKER_PORT` | `1883` | Standard MQTT port. |
+| `MQTT_USERNAME` / `MQTT_PASSWORD` | — | Credentials from Frigate's `mqtt:` config. |
+| `MQTT_TOPIC_PREFIX` | `"frigate"` | Frigate topic prefix. |
 
-#### Frigate
-| Параметр | Описание |
-|---|---|
-| `FRIGATE_URL` | Адрес веб-интерфейса Frigate, откуда качаются фото/видео. Обычно `http://IP:5000`. |
-
-#### Объекты и прочее
-| Параметр | По умолч. | Описание |
+#### Frigate & misc
+| Field | Default | Description |
 |---|---|---|
-| `OBJECTS` | person, car, truck, bus, motorcycle, bicycle | На какие объекты реагировать (имена Frigate). Оставь `["person"]`, если нужны только люди. |
-| `LOG_LEVEL` | `"INFO"` | `INFO` или `DEBUG`. |
-| `STATS_INTERVAL` | `60` | Раз в сколько секунд писать статистику в лог. |
-| `MEDIA_WAIT_TIME` | `25` | Сколько секунд ждать готовности медиа. |
-| `MEDIA_RETRY_ATTEMPTS` | `15` | Сколько раз пытаться скачать фото/видео. |
+| `FRIGATE_URL` | — | Frigate web URL where photos/videos are fetched. Usually `http://IP:5000`. |
+| `OBJECTS` | person, car, truck, bus, motorcycle, bicycle | Which objects to react to (Frigate labels). |
+| `LANG` | `"en"` | Pause‑controller interface language: `"en"` or `"ru"`. |
+| `LOG_LEVEL` | `"INFO"` | `INFO` or `DEBUG`. |
+| `STATS_INTERVAL` / `MEDIA_WAIT_TIME` / `MEDIA_RETRY_ATTEMPTS` | 60 / 25 / 15 | Stats interval; how long to wait for media; download retries. |
 
----
-
-## Обновление до последней версии
+## Updating
 ```bash
-sudo ./manage.sh update    # git pull + переустановка юнитов + рестарт
-./manage.sh version        # локальная версия и последний тег в origin
+sudo ./manage.sh update    # git pull + reinstall units + restart
+./manage.sh version        # local version and latest tag on origin
 ```
-`config.py` не трогается (он в `.gitignore`), поэтому обновление не ломает настройки.
+`config.py` is never touched (it's gitignored), so updates don't break your settings.
 
-## Несколько групп / масштабирование
-Каждая группа запускается шаблонным юнитом `frigate-telegram@<группа>`, а `manage.sh`
-берёт список групп прямо из `config.py`. Чтобы добавить группу (хоть 3-ю, хоть 10-ю):
-1. впиши её в `GROUPS` в `config.py`;
+## Multiple groups / scaling
+Each group runs as a templated systemd unit `frigate-telegram@<group>`, and `manage.sh`
+reads the group list straight from `config.py`. To add a group (a 3rd, a 10th…):
+1. add it to `GROUPS` in `config.py`;
 2. `sudo ./manage.sh install && sudo ./manage.sh start`.
-Ни новых файлов, ни правок кода. Пульт паузы новую группу подхватит сам.
+No new files, no code changes. The pause controller picks up the new group automatically.
 
-## Пауза уведомлений
-Сервис `frigate-telegram-control` (`mute_controller.py`) держит в каждом чате
-клавиатуру внизу: `⏸ 15 мин | 1 час | 3 часа | До утра | ▶️ Включить`. Нажал —
-уведомления этой группы молчат до конца паузы (переживает перезапуск). Пауза действует
-только на ту группу, в чьём чате нажата кнопка.
+## Pause notifications
+The `frigate-telegram-control` service (`mute_controller.py`) keeps a keyboard at the
+bottom of each chat: `⏸ 15 min | 1 h | 3 h | Until morning | ▶️ Resume`. Tap it and that
+group's notifications go silent until the pause ends (it survives restarts). The pause
+applies only to the group whose chat the button was tapped in.
 
-- Включается флагом `mute_controls` на группу (по умолчанию включено).
-- Чтобы бот мог закреплять статус и убирать нажатия — сделай его **администратором**
-  чата (не обязательно; без прав просто чуть больше сообщений в чате).
+- Toggled per group via `mute_controls` (on by default).
+- To let the bot pin the status and clean up taps, make it a chat **admin** (optional).
 
-## Управление
-Все команды запускаются из папки проекта: `./manage.sh <команда>`. Команды, что
-меняют systemd (`install`/`start`/`stop`/`restart`/`enable`/`disable`/`update`/`migrate`),
-требуют `sudo`.
+## Language
+`LANG` in `config.py` sets the pause‑controller interface (`"en"` default or `"ru"`).
+Event notifications carry no text (just photo + video), so they're language‑agnostic.
 
-| Команда | Что делает | Когда нужна |
-|---|---|---|
-| `install` | Копирует systemd-юниты (по группам из `config.py`) + пульт и включает автозапуск. Сам **не** запускает — дальше `start`. | Первый раз и после добавления новой группы. |
-| `start` | Запускает все сервисы (все группы + пульт паузы). | После `install`; чтобы поднять после `stop`. |
-| `stop` | Останавливает все сервисы. | Приостановить работу целиком. |
-| `restart` | Перезапускает все сервисы. | После правки `config.py`, чтобы применить. |
-| `status` | Показывает статус каждой группы и пульта (работает/упал). | Проверить, всё ли живо. |
-| `logs` | Живые логи всех групп + пульта (выход — `Ctrl+C`). | Смотреть, что происходит / искать ошибки. |
-| `enable` | Включает автозапуск при загрузке сервера (не запускает сейчас). | Обычно уже сделано `install`; отдельно почти не нужна. |
-| `disable` | Выключает автозапуск при загрузке (текущий запуск не трогает). | Временно убрать из автозагрузки, не удаляя. |
-| `update` | Обновление до последней версии: `git pull` → переустановка юнитов → рестарт. `config.py` не трогается. | Чтобы подтянуть свежую версию из GitHub. |
-| `version` | Печатает локальную версию (`VERSION`) и последний тег в GitHub. | Узнать свою версию / есть ли новее. |
-| `migrate` | Разовый переход со старой схемы (отдельные юниты `frigate-telegram-group1/2`) на шаблонные `frigate-telegram@`. | Только при апгрейде со старой установки. |
+## Management
+Run from the project folder: `./manage.sh <command>`. Commands that change systemd
+(`install`/`start`/`stop`/`restart`/`enable`/`disable`/`update`/`migrate`) need `sudo`.
 
-Типовой первый запуск: `sudo ./manage.sh install && sudo ./manage.sh start`.
-Обновиться позже: `sudo ./manage.sh update`.
+| Command | What it does |
+|---|---|
+| `install` | Installs systemd units (one per group from `config.py`) + the pause controller, enables autostart. Does **not** start them — run `start` next. |
+| `start` / `stop` / `restart` | Control all services. Use `restart` after editing `config.py`. |
+| `status` | Status of each group + the controller. |
+| `logs` | Live logs of all groups + the controller (`Ctrl+C` to exit). |
+| `enable` / `disable` | Toggle autostart on boot (usually already done by `install`). |
+| `update` | Update to the latest version (git pull + reinstall + restart). |
+| `version` | Show local version and the latest tag. |
+| `migrate` | One‑time migration from the old per‑group units to the templated ones. |
 
-## Как это работает
-Скрипт подписан на MQTT-топик `frigate/events`, ловит завершённые события по нужным
-камерам, объектам и (опционально) зонам, дожидается готовности snapshot + clip и
-отправляет их в чат медиа-группой. Есть повторные попытки, если медиа ещё не готово.
-Пульт паузы (`mute_controller`) — отдельный процесс: слушает нажатия кнопок и пишет
-файл `mute_state.json`, который читают мониторы перед отправкой.
+Typical first run: `sudo ./manage.sh install && sudo ./manage.sh start`.
 
-## Диагностика
-- Сервисы не стартуют → `./manage.sh status`, `journalctl -u 'frigate-telegram@*' -e`.
-- Нет уведомлений → проверь, что события есть во Frigate; логи: `./manage.sh logs`.
-- `❌ Не найден config.py` → сделай `cp config.example.py config.py`.
-- Telegram не доступен (таймауты/`Flood control`) → проверь сеть/прокси; при блокировке
-  укажи `TELEGRAM_PROXY_URL`.
+## How it works
+The script subscribes to the MQTT topic `frigate/events`, catches finished events for the
+configured cameras, objects and (optionally) zones, waits for the snapshot + clip to be
+ready, and sends them to the chat as a media group. It retries if media isn't ready yet.
+On startup it ignores events that finished **before** launch, so it doesn't spam history.
+The pause controller (`mute_controller.py`) is a separate process: it listens for button
+taps and writes `mute_state.json`, which the monitors read before sending.
 
-## Версии
-[Semantic Versioning](https://semver.org/lang/ru/). Изменения — в [CHANGELOG.md](CHANGELOG.md),
-релизы — на вкладке [Releases](https://github.com/Sysoev86/frigate-notify-alert/releases).
+## Troubleshooting
+- Services won't start → `./manage.sh status`, `journalctl -u 'frigate-telegram@*' -e`.
+- No notifications → confirm events exist in Frigate; check `./manage.sh logs`.
+- `config.py not found` → run `cp config.example.py config.py`.
+- Telegram unreachable (timeouts / `Flood control`) → check network/proxy; set
+  `TELEGRAM_PROXY_URL` if Telegram is blocked.
 
-## Лицензия
+## Versioning
+[Semantic Versioning](https://semver.org/). Changes are in [CHANGELOG.md](CHANGELOG.md),
+releases on the [Releases](https://github.com/Sysoev86/frigate-notify-alert/releases) tab.
+
+## License
 [MIT](LICENSE).

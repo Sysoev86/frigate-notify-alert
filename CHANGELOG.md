@@ -1,37 +1,43 @@
 # Changelog
 
-Все заметные изменения проекта. Формат по [Semantic Versioning](https://semver.org/lang/ru/):
+All notable changes. Format follows [Semantic Versioning](https://semver.org/):
 `MAJOR.MINOR.PATCH`.
 
-## [1.0.2] — 2026-07-05
-### Исправлено
-- **Не слать историю при старте.** Раньше при каждом запуске монитор отправлял пачку
-  событий за последний час (первый опрос `/api/events` считал всю историю «новой», т.к.
-  список обработанных пуст). Теперь события, завершившиеся **до** запуска скрипта, не
-  отправляются. Live-события (MQTT) работают как прежде.
+## [1.1.0] — 2026-07-05
+### Added
+- **English is now the primary language.** English `README.md`, `config.example.py`
+  and this changelog. The Russian docs live in [README.ru.md](README.ru.md).
+- **`LANG` option** (`en` / `ru`, default `en`) for the pause-controller interface
+  (button labels and status text). Event notifications carry no text, so they are
+  language-agnostic.
 
-### Документация
-- Добавлен скриншот примера уведомлений в Telegram.
+## [1.0.2] — 2026-07-05
+### Fixed
+- **No history spam on startup.** Previously every launch sent a batch of events from
+  the last hour (the first `/api/events` poll treated all recent history as new, since
+  the processed set was empty). Events that finished **before** startup are no longer
+  sent. Live events (MQTT) work as before.
+### Docs
+- Added a Telegram example screenshot.
 
 ## [1.0.1] — 2026-07-05
-### Исправлено
-- **Переносимость установки:** systemd-юниты больше не привязаны к пути `/opt/frigate-tg`.
-  Раньше при установке в другой каталог сервисы падали с `status=200/CHDIR`. Теперь
-  `manage.sh install` подставляет реальный путь установки (`__APPDIR__`) в юниты.
-- `server_setup.sh` работает из своего каталога и проверяет наличие `config.py`.
+### Fixed
+- **Portable install.** systemd units are no longer tied to `/opt/frigate-tg`. Installing
+  into another directory previously failed with `status=200/CHDIR`. `manage.sh install`
+  now substitutes the real install path into the units.
+- `server_setup.sh` runs from its own directory and checks for `config.py`.
 
 ## [1.0.0] — 2026-07-05
-Первый публичный релиз.
+First public release.
 
-### Возможности
-- Мониторинг событий Frigate через MQTT (`frigate/events`), отправка фото + видео
-  в Telegram при обнаружении человека/машины.
-- Несколько групп камер — каждая в свой чат (`GROUPS` в `config.py`).
-- Масштабирование на любое число групп через шаблонный systemd-юнит
-  `frigate-telegram@<группа>`; `manage.sh` читает список групп из конфига.
-- Фильтр по зонам Frigate (`zones`) — слать только когда объект в нужной зоне.
-- Пауза уведомлений кнопками в Telegram (`mute_controller`): reply-клавиатура
-  внизу чата (⏸ 15м/1ч/3ч/до утра, ▶️ включить). Пауза на группу, переживает
-  перезапуск. Включается флагом `mute_controls` на группу.
-- Прокси для Telegram (обход блокировок).
-- Управление через `manage.sh` (install/start/stop/restart/status/logs/update/version).
+### Features
+- Frigate event monitoring over MQTT (`frigate/events`), sending photo + video to
+  Telegram on person/car detection.
+- Multiple camera groups — each to its own chat (`GROUPS`).
+- Scales to any number of groups via a templated systemd unit `frigate-telegram@<group>`;
+  `manage.sh` reads the group list from the config.
+- Zone filtering (`zones`) — notify only when the object is in a chosen zone.
+- Pause notifications with in-chat buttons (`mute_controller`): a reply keyboard at the
+  bottom of the chat. Per-group, survives restarts. Toggled via `mute_controls`.
+- Optional Telegram proxy.
+- Management via `manage.sh` (install/start/stop/restart/status/logs/update/version).

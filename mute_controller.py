@@ -35,10 +35,10 @@ from telegram.error import BadRequest, TelegramError
 from telegram.request import HTTPXRequest
 
 try:
-    from config import *  # TELEGRAM_BOT_TOKEN, TELEGRAM_PROXY_URL, GROUPS, [MUTE_STATE_FILE]
+    from config import *  # TELEGRAM_BOT_TOKEN, TELEGRAM_PROXY_URL, GROUPS, [MUTE_STATE_FILE, LANG]
 except ModuleNotFoundError as _e:
     if getattr(_e, "name", "") == "config":
-        print("❌ Не найден config.py. Скопируй пример и заполни его:")
+        print("config.py not found. Copy the example and fill it in:")
         print("   cp config.example.py config.py")
         raise SystemExit(1)
     raise
@@ -47,12 +47,42 @@ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 MUTE_STATE_FILE = globals().get("MUTE_STATE_FILE") or os.path.join(_SCRIPT_DIR, "mute_state.json")
 STATUS_FILE = os.path.join(_SCRIPT_DIR, "mute_controller_status.json")
 
-# Тексты кнопок → длительность паузы в минутах. None = особые действия.
-BTN_15 = "⏸ 15 мин"
-BTN_1H = "⏸ 1 час"
-BTN_3H = "⏸ 3 часа"
-BTN_MORNING = "⏸ До утра"
-BTN_ON = "▶️ Включить уведомления"
+# Interface language of the pause controller (button/status text). "en" or "ru".
+LANG = str(globals().get("LANG") or "en").lower()
+if LANG not in ("en", "ru"):
+    LANG = "en"
+
+# Localized strings. Buttons are matched by their text, and both the keyboard
+# and the matcher use the same table, so switching LANG keeps them consistent.
+STRINGS = {
+    "en": {
+        "btn_15": "⏸ 15 min",
+        "btn_1h": "⏸ 1 hour",
+        "btn_3h": "⏸ 3 hours",
+        "btn_morning": "⏸ Until morning",
+        "btn_on": "▶️ Resume notifications",
+        "keyboard_prompt": "🎛 Notification pause — buttons below 👇",
+        "disabled": "🎛 Pause controls disabled for this group.",
+        "status_paused": "🔕 «{name}»: notifications paused until {when}\n▶️ resume with the button below",
+    },
+    "ru": {
+        "btn_15": "⏸ 15 мин",
+        "btn_1h": "⏸ 1 час",
+        "btn_3h": "⏸ 3 часа",
+        "btn_morning": "⏸ До утра",
+        "btn_on": "▶️ Включить уведомления",
+        "keyboard_prompt": "🎛 Пульт паузы уведомлений — кнопки внизу 👇",
+        "disabled": "🎛 Пульт паузы отключён для этой группы.",
+        "status_paused": "🔕 «{name}»: уведомления на паузе до {when}\n▶️ включить — кнопкой внизу",
+    },
+}
+S = STRINGS[LANG]
+
+BTN_15 = S["btn_15"]
+BTN_1H = S["btn_1h"]
+BTN_3H = S["btn_3h"]
+BTN_MORNING = S["btn_morning"]
+BTN_ON = S["btn_on"]
 
 FIXED_DURATIONS = {BTN_15: 15, BTN_1H: 60, BTN_3H: 180}
 
@@ -95,7 +125,7 @@ def _minutes_until_morning() -> int:
 
 def _status_text(group_name: str, muted_until: float) -> str:
     when = datetime.fromtimestamp(muted_until).strftime("%H:%M (%d.%m)")
-    return f"🔕 «{group_name}»: уведомления на паузе до {when}\n▶️ включить — кнопкой внизу"
+    return S["status_paused"].format(name=group_name, when=when)
 
 
 class MuteController:
@@ -164,7 +194,7 @@ class MuteController:
         try:
             await self.bot.send_message(
                 chat_id=int(chat_id),
-                text="🎛 Пульт паузы отключён для этой группы.",
+                text=S["disabled"],
                 reply_markup=ReplyKeyboardRemove(),
             )
         except TelegramError as e:
@@ -182,7 +212,7 @@ class MuteController:
         try:
             msg = await self.bot.send_message(
                 chat_id=int(chat_id),
-                text="🎛 Пульт паузы уведомлений — кнопки внизу 👇",
+                text=S["keyboard_prompt"],
                 reply_markup=KEYBOARD,
             )
             entry["kb"] = msg.message_id
