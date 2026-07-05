@@ -20,7 +20,6 @@ own chat), optional zone filtering, and in‑chat pause buttons — all in Teleg
 - [Updating](#updating)
 - [Multiple groups / scaling](#multiple-groups--scaling)
 - [Pause notifications](#pause-notifications)
-- [Language](#language)
 - [Management](#management)
 - [How it works](#how-it-works)
 - [Troubleshooting](#troubleshooting)
@@ -47,9 +46,9 @@ and video**, Frigate needs **three** things enabled:
 
 | What | Why | Without it |
 |---|---|---|
-| **MQTT** | the script learns about events via `frigate/events` | no notifications at all |
-| **Snapshots** | provides the event photo (`has_snapshot`) | no photo |
-| **Record** | provides the event video clip (`has_clip`) | no video |
+| **MQTT** | real-time event delivery (`frigate/events`) | events only via API polling — delayed |
+| **Snapshots** | provides the event photo (`has_snapshot`) | no photo → event is never sent |
+| **Record** | provides the event video clip (`has_clip`) | no video → event is never sent |
 
 Also, the objects in `objects.track` must overlap with `OBJECTS` in `config.py`, and
 zones (if you want the `zones` filter) must be defined on the cameras.
@@ -103,23 +102,17 @@ cameras:
         coordinates: 0.1,0.9,0.9,0.9,0.9,0.1,0.1,0.1
 ```
 
-`snapshots`, `record` and `objects.track` can be set **globally** (as above) **or
-per‑camera** — what matters is the **effective** value on the camera (e.g. global
-`snapshots: false` but enabled on specific cameras is enough).
-
-> **Why `mode: active_objects`?** With `mode: motion`, a motion mask covering the area
-> where objects move makes Frigate silently drop those recording segments — events get a
-> snapshot but never a clip (`has_clip: false`). `active_objects` retains segments by the
-> tracked object itself, so motion masks can't break clips. See
-> [Troubleshooting](#troubleshooting).
-
-> **Frigate versions.** The example targets 0.14+ (tested on **0.17**), where recording
-> retention lives under `record.alerts` / `record.detections`. On older 0.13 it was
-> `record.events.retain`. Docs:
-> [snapshots](https://docs.frigate.video/configuration/snapshots),
-> [record](https://docs.frigate.video/configuration/record),
-> [objects](https://docs.frigate.video/configuration/objects),
-> [zones](https://docs.frigate.video/configuration/zones).
+Notes:
+- `snapshots`, `record` and `objects.track` work **globally or per‑camera** — what matters
+  is the effective value on the camera.
+- **`mode: active_objects` is deliberate:** with `mode: motion`, a motion mask over the area
+  where objects move silently drops those clips (photo arrives, video never does) — see
+  [Troubleshooting](#troubleshooting).
+- Example targets Frigate **0.14+** (tested on 0.17); on 0.13 retention was
+  `record.events.retain`. Official docs:
+  [record](https://docs.frigate.video/configuration/record) ·
+  [snapshots](https://docs.frigate.video/configuration/snapshots) ·
+  [zones](https://docs.frigate.video/configuration/zones).
 
 ### Verify it's ready
 After editing the config, **restart Frigate**. A finished event should have
@@ -236,7 +229,7 @@ A group = a set of cameras + one chat. You can have any number of groups
 #### Frigate & misc
 | Field | Default | Description |
 |---|---|---|
-| `FRIGATE_URL` | — | Frigate web URL where photos/videos are fetched. Usually `http://IP:5000`. |
+| `FRIGATE_URL` | — | Frigate API URL where photos/videos are fetched. Must be the **unauthenticated internal port 5000** — the authenticated port 8971 won't work (the bot sends no credentials). |
 | `OBJECTS` | person, car, truck, bus, motorcycle, bicycle | Which objects to react to (Frigate labels). |
 | `LANG` | `"en"` | Pause‑controller interface language: `"en"` or `"ru"`. |
 | `LOG_LEVEL` | `"INFO"` | `INFO` or `DEBUG` (DEBUG logs every poll cycle in detail). |
@@ -250,11 +243,10 @@ sudo ./manage.sh update    # git pull + reinstall units + restart
 `config.py` is never touched (it's gitignored), so updates don't break your settings.
 
 ## Multiple groups / scaling
-Each group runs as a templated systemd unit `frigate-telegram@<group>`, and `manage.sh`
-reads the group list straight from `config.py`. To add a group (a 3rd, a 10th…):
-1. add it to `GROUPS` in `config.py`;
-2. `sudo ./manage.sh install && sudo ./manage.sh start`.
-No new files, no code changes. The pause controller picks up the new group automatically.
+Each group runs as a templated systemd unit `frigate-telegram@<group>`; `manage.sh` reads
+the group list straight from `config.py`. To add a group: put it into `GROUPS`, then
+`sudo ./manage.sh install && sudo ./manage.sh start` — no new files, no code changes.
+The pause controller picks up new groups automatically.
 
 ## Pause notifications
 The `frigate-telegram-control` service (`mute_controller.py`) keeps a keyboard at the
@@ -262,12 +254,8 @@ bottom of each chat: `⏸ 15 min | 1 h | 3 h | Until morning | ▶️ Resume`. T
 group's notifications go silent until the pause ends (it survives restarts). The pause
 applies only to the group whose chat the button was tapped in.
 
-- Toggled per group via `mute_controls` (on by default).
+- Toggled per group via `mute_controls` (on by default); button language — via `LANG`.
 - To let the bot pin the status and clean up taps, make it a chat **admin** (optional).
-
-## Language
-`LANG` in `config.py` sets the pause‑controller interface (`"en"` default or `"ru"`).
-Event notifications carry no text (just photo + video), so they're language‑agnostic.
 
 ## Management
 Run from the project folder: `./manage.sh <command>`. Commands that change systemd
@@ -284,15 +272,13 @@ Run from the project folder: `./manage.sh <command>`. Commands that change syste
 | `version` | Show local version and the latest tag. |
 | `migrate` | One‑time migration from the old per‑group units to the templated ones. |
 
-Typical first run: `sudo ./manage.sh install && sudo ./manage.sh start`.
-
 ## How it works
-The script subscribes to the MQTT topic `frigate/events`, catches finished events for the
-configured cameras, objects and (optionally) zones, waits for the snapshot + clip to be
-ready, and sends them to the chat as a media group. It retries if media isn't ready yet.
-On startup it ignores events that finished **before** launch, so it doesn't spam history.
-The pause controller (`mute_controller.py`) is a separate process: it listens for button
-taps and writes `mute_state.json`, which the monitors read before sending.
+The script gets events in real time from the MQTT topic `frigate/events` (with `/api/events`
+polling as a fallback), filters them by camera, object and (optionally) zone, waits for the
+snapshot + clip to be ready, and sends both to the chat as a media group. On startup it
+ignores events that finished **before** launch, so it doesn't spam history. The pause
+controller (`mute_controller.py`) is a separate process: it listens for button taps and
+writes `mute_state.json`, which the monitors read before sending.
 
 ## Troubleshooting
 - Services won't start → `./manage.sh status`, `journalctl -u 'frigate-telegram@*' -e`.
