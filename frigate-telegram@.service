@@ -1,0 +1,18 @@
+[Unit]
+# Шаблонный сервис: %i — имя группы из config.py (GROUPS).
+# Запуск любой группы: systemctl enable --now frigate-telegram@group3
+Description=Frigate Telegram Monitor - группа %i
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/frigate-tg
+ExecStart=/bin/bash -c "source /opt/frigate-tg/venv/bin/activate && python /opt/frigate-tg/frigate_telegram_monitor.py %i"
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

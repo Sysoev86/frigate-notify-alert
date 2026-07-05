@@ -1,0 +1,16 @@
+[Unit]
+Description=Frigate Telegram Monitor - Mute Controller (кнопки паузы)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/frigate-tg
+ExecStart=/bin/bash -c "source /opt/frigate-tg/venv/bin/activate && python /opt/frigate-tg/mute_controller.py"
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

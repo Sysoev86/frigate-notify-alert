@@ -1,0 +1,28 @@
+# Секреты и локальные данные — НЕ коммитить
+config.py
+*.env
+
+# Состояние рантайма
+mute_state.json
+mute_controller_status.json
+*.bak
+
+# Логи
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+*.egg-info/
+.eggs/
+
+# IDE / OS
+.idea/
+.vscode/
+.cursor/
+.DS_Store
+*.swp
+*.swo
