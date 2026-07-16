@@ -135,3 +135,5 @@ LOG_FORMAT = "%(asctime)s - %(levelname)s - %(message)s"
 STATS_INTERVAL = 60        # how often (seconds) to write stats to the log
 MEDIA_RETRY_ATTEMPTS = 15  # how many times to retry downloading photo/video
 MEDIA_RETRY_DELAY = 3      # seconds between download retries
+MAX_CLIP_MB = 45           # clip size cap (Telegram bots can't upload > 50 MB);
+                           # oversized events get a trimmed clip (first N seconds) + note

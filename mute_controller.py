@@ -105,6 +105,8 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
     datefmt="%d.%m.%Y %H:%M:%S",
 )
+# httpx logs full request URLs including the bot token — keep it quiet
+logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("mute_controller")
 
 
@@ -313,6 +315,18 @@ class MuteController:
 
     async def run(self):
         log.info(f"🚀 Mute Controller started. Chats: {list(self.chat_to_group.keys())}")
+
+        # A webhook left on the token (by other bot software) blocks getUpdates
+        # entirely — buttons would spam '409 Conflict' forever. Remove it.
+        try:
+            info = await self.bot.get_webhook_info()
+            if info.url:
+                await self.bot.delete_webhook()
+                log.warning(f"🔧 Removed a webhook set on this bot ({info.url}) — "
+                            f"it blocked button handling (getUpdates)")
+        except TelegramError as e:
+            log.warning(f"⚠️ webhook check: {e}")
+
         # On start: remove controls from disabled groups...
         for chat_id in self.disabled_chats:
             await self._disable_chat(chat_id)

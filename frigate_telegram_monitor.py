@@ -76,6 +76,13 @@ POLL_INTERVAL = 3          # seconds between /api/events polls
 MIN_MEDIA_BYTES = 1000     # smaller responses are treated as "not ready yet"
 QUEUE_MAX_RETRIES = 10     # polls to wait for media before dropping an event
 
+# Telegram bots can't upload files over 50 MB; long events (a person working in
+# the room for an hour) produce clips of hundreds of MB — downloading those into
+# RAM got real installs OOM-killed. Cap the clip: oversized events are sent as
+# photo-only with a note. Override with MAX_CLIP_MB in config.py.
+MAX_CLIP_MB = int(globals().get("MAX_CLIP_MB") or 45)
+TOO_BIG = object()  # sentinel returned by _download when the cap is exceeded
+
 
 def config_errors() -> list:
     """Static config validation for a clear startup error instead of a traceback.
@@ -176,6 +183,9 @@ class FrigateTelegramMonitor:
     # ------------------------------------------------------------------ setup
 
     def _setup_logging(self) -> logging.Logger:
+        # httpx logs full request URLs including the bot token — keep it quiet
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+
         logger = logging.getLogger(f"frigate_monitor_{self.group_id}")
         logger.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
         if logger.handlers:  # don't stack handlers on re-init
@@ -413,10 +423,7 @@ class FrigateTelegramMonitor:
                 f"snapshot={event.get('has_snapshot')} clip={event.get('has_clip')}"
             )
 
-            photo_url = f"{FRIGATE_URL}/api/events/{event_id}/snapshot.jpg?crop=1"
-            video_url = f"{FRIGATE_URL}/api/events/{event_id}/clip.mp4"
-
-            success = await self._send_event_media(photo_url, video_url, event_id)
+            success = await self._send_event_media(event)
             if success:
                 self.logger.info(f"✅ Media sent for event {event_id}")
                 self.stats["telegram_sent"] += 1
@@ -430,8 +437,12 @@ class FrigateTelegramMonitor:
             self.logger.error(f"❌ Error processing event: {e}")
             self.stats["errors"] += 1
 
-    async def _download(self, url: str, timeout_s: int, label: str) -> Optional[bytes]:
-        """Fetch a media file; None if unavailable or suspiciously small."""
+    async def _download(self, url: str, timeout_s: int, label: str, max_bytes: int = 0):
+        """Fetch a media file; None if unavailable or suspiciously small.
+
+        With max_bytes set, returns the TOO_BIG sentinel instead of loading an
+        oversized file into RAM (checked via Content-Length first, then while
+        streaming — a 1 GB clip must never end up in memory)."""
         try:
             async with self.http.get(
                 url, timeout=aiohttp.ClientTimeout(total=timeout_s)
@@ -439,33 +450,70 @@ class FrigateTelegramMonitor:
                 if response.status != 200:
                     self.logger.debug(f"{label}: HTTP {response.status}")
                     return None
-                data = await response.read()
+                if max_bytes and response.content_length and response.content_length > max_bytes:
+                    self.logger.warning(
+                        f"{label}: {response.content_length / 1024 / 1024:.0f} MB exceeds "
+                        f"the {MAX_CLIP_MB} MB limit — not downloading"
+                    )
+                    self._last_oversize_bytes = response.content_length
+                    return TOO_BIG
+                data = bytearray()
+                async for chunk in response.content.iter_chunked(1 << 20):
+                    data.extend(chunk)
+                    if max_bytes and len(data) > max_bytes:
+                        self.logger.warning(
+                            f"{label}: exceeded the {MAX_CLIP_MB} MB limit while "
+                            f"downloading — aborted"
+                        )
+                        self._last_oversize_bytes = 0  # size unknown (no Content-Length)
+                        return TOO_BIG
                 if len(data) < MIN_MEDIA_BYTES:
                     self.logger.debug(f"{label}: too small ({len(data)} bytes), not ready")
                     return None
-                return data
+                return bytes(data)
         except Exception as e:
             self.logger.debug(f"{label}: download error: {e}")
             return None
 
-    async def _send_event_media(self, photo_url: str, video_url: str, event_id: str) -> bool:
+    async def _send_event_media(self, event: Dict[str, Any]) -> bool:
         """Download snapshot + clip (retrying while Frigate finalizes them),
-        then send both as one media group. Each file is downloaded once."""
+        then send both as one media group. Each file is downloaded once.
+
+        An oversized clip (Telegram bots can't upload > 50 MB; hour-long events
+        used to OOM the process) degrades to a TRIMMED clip — the first N
+        seconds fetched via Frigate's time-range recordings API — so the chat
+        still gets the usual compact photo+video album, just with a caption.
+        Photo-only is the very last resort."""
+        event_id = event.get("id")
+        photo_url = f"{FRIGATE_URL}/api/events/{event_id}/snapshot.jpg?crop=1"
+        video_url = f"{FRIGATE_URL}/api/events/{event_id}/clip.mp4"
+        cap = MAX_CLIP_MB * 1024 * 1024
+
         photo_data = video_data = None
+        caption = None
 
         for attempt in range(1, MEDIA_RETRY_ATTEMPTS + 1):
             if photo_data is None:
                 photo_data = await self._download(photo_url, 45, f"📸 snapshot {event_id}")
             if video_data is None:
-                video_data = await self._download(video_url, 90, f"🎥 clip {event_id}")
+                v = await self._download(video_url, 90, f"🎥 clip {event_id}", max_bytes=cap)
+                if v is TOO_BIG:
+                    # Full clip won't fit — try the first N seconds instead
+                    v, caption = await self._download_trimmed_clip(event, cap)
+                    video_data = v if v is not None else TOO_BIG  # TOO_BIG = give up on video
+                elif v is not None:
+                    video_data = v
 
-            if photo_data is not None and video_data is not None:
+            if photo_data is not None and isinstance(video_data, bytes):
                 self.logger.info(
-                    f"🎥 Clip downloaded: {len(video_data)} bytes "
-                    f"({len(video_data) / 1024 / 1024:.2f} MB) | "
+                    f"🎥 Clip ready: {len(video_data) / 1024 / 1024:.2f} MB"
+                    f"{' (trimmed)' if caption else ''} | "
                     f"snapshot {len(photo_data)} bytes (attempt {attempt})"
                 )
-                return await self._send_media_group(photo_data, video_data)
+                return await self._send_media_group(photo_data, video_data, caption)
+
+            if photo_data is not None and video_data is TOO_BIG:
+                return await self._send_photo_only(photo_data)
 
             self.logger.debug(
                 f"⏳ {event_id}: media not ready (attempt {attempt}/{MEDIA_RETRY_ATTEMPTS}, "
@@ -477,6 +525,70 @@ class FrigateTelegramMonitor:
         self.logger.error(f"❌ Media never became available for {event_id} "
                           f"after {MEDIA_RETRY_ATTEMPTS} attempts")
         return False
+
+    async def _download_trimmed_clip(self, event: Dict[str, Any], cap: int):
+        """First-N-seconds fallback for oversized clips, via Frigate's
+        time-range recordings API (/api/<camera>/start/<t1>/end/<t2>/clip.mp4).
+
+        N is estimated from the full clip's bitrate so the result fits the cap;
+        halved and retried if the estimate was off. Returns (bytes, caption)
+        or (None, None) if the range API gave nothing usable."""
+        camera = event.get("camera")
+        start = event.get("start_time")
+        end = event.get("end_time")
+        event_id = event.get("id")
+        if not (camera and start and end):
+            return None, None
+
+        duration = max(1, int(end - start))
+        full_size = getattr(self, "_last_oversize_bytes", 0)
+        if full_size:
+            secs = int(cap / (full_size / duration) * 0.85)
+        else:
+            secs = 60
+        secs = max(10, min(secs, duration, 300))
+
+        for _ in range(3):
+            url = (f"{FRIGATE_URL}/api/{camera}/start/{int(start)}"
+                   f"/end/{int(start) + secs}/clip.mp4")
+            data = await self._download(url, 90, f"🎥 trimmed clip {event_id} ({secs}s)",
+                                        max_bytes=cap)
+            if isinstance(data, bytes):
+                minutes = max(1, round(duration / 60))
+                if LANG == "ru":
+                    caption = (f"⚠️ Событие длинное ({minutes} мин), клип целиком не влезает "
+                               f"в Telegram — первые {secs} сек. Полная запись — во Frigate.")
+                else:
+                    caption = (f"⚠️ Long event ({minutes} min) — the full clip doesn't fit "
+                               f"Telegram, showing the first {secs}s. Full recording is in Frigate.")
+                return data, caption
+            if data is TOO_BIG and secs > 15:
+                secs //= 2
+                continue
+            break
+        return None, None
+
+    async def _send_photo_only(self, photo_data: bytes) -> bool:
+        """Very last resort (clip oversized AND the range API unavailable):
+        deliver at least the snapshot with an explanatory caption."""
+        if LANG == "ru":
+            caption = (f"🎥 Клип события слишком большой для Telegram (> {MAX_CLIP_MB} МБ) — "
+                       f"смотри запись во Frigate")
+        else:
+            caption = (f"🎥 The event clip is too large for Telegram (> {MAX_CLIP_MB} MB) — "
+                       f"watch the recording in Frigate")
+        try:
+            await self.bot.send_photo(
+                chat_id=self.group_config["telegram_chat_id"],
+                photo=photo_data,
+                caption=caption,
+                disable_notification=self.silent,
+            )
+            self.logger.info("✅ Photo-only sent (clip over the size limit)")
+            return True
+        except TelegramError as e:
+            self.logger.error(f"❌ Telegram error (photo-only): {e}")
+            return False
 
     async def _send_startup_notice(self):
         """Silent one-liner on start: proves the bot can post to this chat and
@@ -504,12 +616,15 @@ class FrigateTelegramMonitor:
             self.logger.error(f"❌ Startup notice failed: {e} — check the bot token "
                               f"and that the bot is a member of the chat")
 
-    async def _send_media_group(self, photo_data: bytes, video_data: bytes) -> bool:
-        """Send photo + video to the group's chat as one silent media group."""
+    async def _send_media_group(self, photo_data: bytes, video_data: bytes,
+                                caption: Optional[str] = None) -> bool:
+        """Send photo + video to the group's chat as one media group.
+        A caption on the first item shows up as the album caption."""
         try:
             await self.bot.send_media_group(
                 chat_id=self.group_config["telegram_chat_id"],
-                media=[InputMediaPhoto(media=photo_data), InputMediaVideo(media=video_data)],
+                media=[InputMediaPhoto(media=photo_data, caption=caption),
+                       InputMediaVideo(media=video_data)],
                 disable_notification=self.silent,
             )
             self.logger.info("✅ Media group sent")

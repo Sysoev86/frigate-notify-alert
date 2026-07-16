@@ -226,6 +226,15 @@ async def check_telegram(cfg):
             if "timed out" in str(e).lower() or "connect" in str(e).lower() else ""
         fail(f"Telegram: token/connection problem: {e}{hint}")
         return
+    try:
+        info = await bot.get_webhook_info()
+        if info.url:
+            warn(f"Telegram: a webhook is set on this bot ({info.url}) — it blocks the "
+                 f"pause buttons (getUpdates); the controller removes it automatically on start")
+        else:
+            ok("Telegram: no webhook set (button handling is free to poll)")
+    except TelegramError:
+        pass
     for gid, g in cfg.GROUPS.items():
         try:
             chat = await bot.get_chat(_chat_id(g["telegram_chat_id"]))

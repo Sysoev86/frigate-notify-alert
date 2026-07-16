@@ -5,6 +5,25 @@
 All notable changes. Format follows [Semantic Versioning](https://semver.org/):
 `MAJOR.MINOR.PATCH`.
 
+## [1.3.4] — 2026-07-16
+### Fixed
+- **OOM on huge clips.** Long events (e.g. a person working in a warehouse for an hour)
+  produce clips of hundreds of MB; downloading them into RAM got real installs killed by
+  the OOM killer — and Telegram bots can't upload files over 50 MB anyway. Clips are now
+  capped (`MAX_CLIP_MB`, default 45; checked via Content-Length and while streaming).
+  Oversized events are delivered as the usual compact photo+video album with a **trimmed
+  clip** (the first N seconds, sized from the clip's bitrate, via Frigate's time-range
+  recordings API) and a caption; photo-only is the very last resort.
+- **Webhook conflict.** A webhook left on the bot token (by other bot software) silently
+  broke the pause buttons with endless `409 Conflict`. The controller now detects and
+  removes it on start; `doctor` reports it too.
+- **Bot token no longer leaks into logs.** httpx logged every request URL including the
+  token — its INFO logging is now silenced in both processes.
+
+### Added
+- Optional error reporting to GlitchTip/Sentry: set the `GLITCHTIP_DSN` environment
+  variable (plus `pip install sentry-sdk`); without it nothing changes.
+
 ## [1.3.3] — 2026-07-06
 ### Fixed
 - **Stale pinned pause status.** The pinned "🔕 paused until X" was only refreshed by a

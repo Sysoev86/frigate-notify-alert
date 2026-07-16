@@ -234,6 +234,7 @@ A group = a set of cameras + one chat. You can have any number of groups
 | `LANG` | `"en"` | Pause‑controller interface language: `"en"` or `"ru"`. |
 | `LOG_LEVEL` | `"INFO"` | `INFO` or `DEBUG` (DEBUG logs every poll cycle in detail). |
 | `STATS_INTERVAL` / `MEDIA_RETRY_ATTEMPTS` / `MEDIA_RETRY_DELAY` | 60 / 15 / 3 | Stats interval (s); media download retries; delay between retries (s). |
+| `MAX_CLIP_MB` | `45` | Clip size cap. Telegram bots can't upload files over 50 MB, and giant clips (hour-long events) used to OOM-kill the process; oversized events arrive as the usual album with a **trimmed clip (first N seconds) + a note**. |
 
 ## Updating
 ```bash
