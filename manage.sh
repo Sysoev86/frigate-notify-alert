@@ -62,6 +62,37 @@ install_deps() {
     ./venv/bin/pip install -q -r requirements.txt
 }
 
+# Print the CHANGELOG entries added between two versions ("what's new" after an
+# update). Uses the Russian changelog when the config asks for LANG = "ru".
+show_whats_new() {
+    local old="$1" new="$2"
+    [ -n "$old" ] && [ "$old" = "$new" ] && return 0
+
+    local file="CHANGELOG.md"
+    if [ "$(python3 -c 'import config; print(getattr(config, "LANG", "en"))' 2>/dev/null)" = "ru" ] \
+       && [ -f CHANGELOG.ru.md ]; then
+        file="CHANGELOG.ru.md"
+    fi
+    [ -f "$file" ] || return 0
+
+    # Everything from the newest entry down to (not including) the old version
+    local body
+    body="$(awk -v stop="## [$old]" '
+        /^## \[/ { if (substr($0, 1, length(stop)) == stop) exit; started = 1 }
+        started
+    ' "$file")" || true
+    [ -n "$body" ] || return 0
+
+    echo ""
+    echo "📝 What's new in $new (you had ${old:-an older version}):"
+    echo ""
+    printf '%s\n' "$body" | head -60 | sed 's/^/   /'
+    if [ "$(printf '%s\n' "$body" | wc -l)" -gt 60 ]; then
+        echo "   … full list: $file"
+    fi
+    echo ""
+}
+
 # systemd units are generated here (no separate .service files to maintain);
 # $APPDIR is baked in at install time, %i is the group name from config.py
 write_units() {
@@ -210,12 +241,14 @@ case "${1:-}" in
     update)
         need_systemd; need_root update
         echo "⬇️  Updating to the latest version..."
+        old_ver="$(cat VERSION 2>/dev/null || true)"
         git pull --ff-only origin main || { echo "❌ git pull failed"; exit 1; }
+        new_ver="$(cat VERSION 2>/dev/null || true)"
         echo "🔧 Reinstalling units and restarting..."
-        "$0" install
-        "$0" restart
-        "$0" version
-        echo "✅ Updated"
+        "$0" install >/dev/null
+        "$0" restart >/dev/null
+        echo "✅ Updated: ${old_ver:-?} → ${new_ver:-?}"
+        show_whats_new "$old_ver" "$new_ver"
         ;;
     *)
         echo "🔧 frigate-notify-alert service management"
