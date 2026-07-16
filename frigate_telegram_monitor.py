@@ -82,6 +82,8 @@ QUEUE_MAX_RETRIES = 10     # polls to wait for media before dropping an event
 # photo-only with a note. Override with MAX_CLIP_MB in config.py.
 MAX_CLIP_MB = int(globals().get("MAX_CLIP_MB") or 45)
 TOO_BIG = object()  # sentinel returned by _download when the cap is exceeded
+PROBE_SECONDS = 10   # short slice used to measure the clip's real bitrate
+MAX_TRIM_SECONDS = 300  # never send more than 5 minutes of a trimmed clip
 
 
 def config_errors() -> list:
@@ -455,7 +457,6 @@ class FrigateTelegramMonitor:
                         f"{label}: {response.content_length / 1024 / 1024:.0f} MB exceeds "
                         f"the {MAX_CLIP_MB} MB limit — not downloading"
                     )
-                    self._last_oversize_bytes = response.content_length
                     return TOO_BIG
                 data = bytearray()
                 async for chunk in response.content.iter_chunked(1 << 20):
@@ -465,7 +466,6 @@ class FrigateTelegramMonitor:
                             f"{label}: exceeded the {MAX_CLIP_MB} MB limit while "
                             f"downloading — aborted"
                         )
-                        self._last_oversize_bytes = 0  # size unknown (no Content-Length)
                         return TOO_BIG
                 if len(data) < MIN_MEDIA_BYTES:
                     self.logger.debug(f"{label}: too small ({len(data)} bytes), not ready")
@@ -498,8 +498,8 @@ class FrigateTelegramMonitor:
             if video_data is None:
                 v = await self._download(video_url, 90, f"🎥 clip {event_id}", max_bytes=cap)
                 if v is TOO_BIG:
-                    # Full clip won't fit — try the first N seconds instead
-                    v, caption = await self._download_trimmed_clip(event, cap)
+                    # Full clip won't fit — send the first N seconds instead
+                    v, _secs, caption = await self._download_trimmed_clip(event, cap)
                     video_data = v if v is not None else TOO_BIG  # TOO_BIG = give up on video
                 elif v is not None:
                     video_data = v
@@ -530,43 +530,60 @@ class FrigateTelegramMonitor:
         """First-N-seconds fallback for oversized clips, via Frigate's
         time-range recordings API (/api/<camera>/start/<t1>/end/<t2>/clip.mp4).
 
-        N is estimated from the full clip's bitrate so the result fits the cap;
-        halved and retried if the estimate was off. Returns (bytes, caption)
-        or (None, None) if the range API gave nothing usable."""
+        Frigate streams clips without Content-Length, so the bitrate can't be
+        known upfront: fetch a short probe, measure bytes/second from it, then
+        ask for exactly as many seconds as fit the cap. Two requests, no
+        guessing. Returns (bytes, seconds, caption) or (None, 0, None) if the
+        range API gave nothing usable."""
         camera = event.get("camera")
         start = event.get("start_time")
         end = event.get("end_time")
         event_id = event.get("id")
         if not (camera and start and end):
-            return None, None
+            return None, 0, None
 
         duration = max(1, int(end - start))
-        full_size = getattr(self, "_last_oversize_bytes", 0)
-        if full_size:
-            secs = int(cap / (full_size / duration) * 0.85)
-        else:
-            secs = 60
-        secs = max(10, min(secs, duration, 300))
 
-        for _ in range(3):
-            url = (f"{FRIGATE_URL}/api/{camera}/start/{int(start)}"
-                   f"/end/{int(start) + secs}/clip.mp4")
-            data = await self._download(url, 90, f"🎥 trimmed clip {event_id} ({secs}s)",
-                                        max_bytes=cap)
-            if isinstance(data, bytes):
-                minutes = max(1, round(duration / 60))
-                if LANG == "ru":
-                    caption = (f"⚠️ Событие длинное ({minutes} мин), клип целиком не влезает "
-                               f"в Telegram — первые {secs} сек. Полная запись — во Frigate.")
-                else:
-                    caption = (f"⚠️ Long event ({minutes} min) — the full clip doesn't fit "
-                               f"Telegram, showing the first {secs}s. Full recording is in Frigate.")
-                return data, caption
-            if data is TOO_BIG and secs > 15:
-                secs //= 2
-                continue
-            break
-        return None, None
+        def range_url(secs: int) -> str:
+            return (f"{FRIGATE_URL}/api/{camera}/start/{int(start)}"
+                    f"/end/{int(start) + secs}/clip.mp4")
+
+        probe_secs = min(PROBE_SECONDS, duration)
+        probe = await self._download(range_url(probe_secs), 60,
+                                     f"🎥 probe {event_id} ({probe_secs}s)", max_bytes=cap)
+        if not isinstance(probe, bytes):
+            self.logger.warning(f"🎥 {event_id}: range API gave no usable probe — "
+                                f"cannot trim the clip")
+            return None, 0, None
+
+        bps = len(probe) / probe_secs
+        secs = int(cap * 0.85 / bps) if bps else probe_secs
+        secs = max(probe_secs, min(secs, duration, MAX_TRIM_SECONDS))
+        self.logger.info(
+            f"🎥 {event_id}: clip too big — probe {len(probe) / 1024 / 1024:.1f} MB/"
+            f"{probe_secs}s ⇒ {bps / 1024:.0f} KB/s, trimming to {secs}s of {duration}s"
+        )
+
+        data = probe
+        if secs > probe_secs:
+            trimmed = await self._download(range_url(secs), 120,
+                                           f"🎥 trimmed clip {event_id} ({secs}s)",
+                                           max_bytes=cap)
+            if isinstance(trimmed, bytes):
+                data = trimmed
+            else:  # estimate was optimistic — keep the probe we already have
+                self.logger.warning(f"🎥 {event_id}: {secs}s still too big, "
+                                    f"falling back to the {probe_secs}s probe")
+                secs = probe_secs
+
+        minutes = max(1, round(duration / 60))
+        if LANG == "ru":
+            caption = (f"⚠️ Событие длинное ({minutes} мин), клип целиком не влезает "
+                       f"в Telegram — первые {secs} сек. Полная запись — во Frigate.")
+        else:
+            caption = (f"⚠️ Long event ({minutes} min) — the full clip doesn't fit "
+                       f"Telegram, showing the first {secs}s. Full recording is in Frigate.")
+        return data, secs, caption
 
     async def _send_photo_only(self, photo_data: bytes) -> bool:
         """Very last resort (clip oversized AND the range API unavailable):
