@@ -21,8 +21,17 @@ All notable changes. Format follows [Semantic Versioning](https://semver.org/):
   token — its INFO logging is now silenced in both processes.
 
 ### Added
+- **Config hints.** `manage.sh update` brings new code but never touches `config.py`, so
+  new settings stayed invisible (one user ran the English UI for weeks without knowing
+  `LANG` exists). The monitor's startup log and `doctor` now list options missing from
+  your config, and point out a Russian setup (Cyrillic group names) running the default
+  English interface. Future options are picked up automatically.
 - Optional error reporting to GlitchTip/Sentry: set the `GLITCHTIP_DSN` environment
   variable (plus `pip install sentry-sdk`); without it nothing changes.
+
+### Internal
+- Config validation was duplicated in the monitor and the controller (and a third variant
+  in `doctor`) — now shared in `config_check.py`.
 
 ## [1.3.3] — 2026-07-06
 ### Fixed
