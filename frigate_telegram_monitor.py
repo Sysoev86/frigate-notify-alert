@@ -548,13 +548,18 @@ class FrigateTelegramMonitor:
                                     f"falling back to the {probe_secs}s probe")
                 secs = probe_secs
 
+        # Log: the full story for whoever debugs. Chat caption: one short line.
+        self.logger.info(
+            f"✂️ {event_id}: sending a trimmed clip — first {secs}s of {duration}s "
+            f"({len(data) / 1024 / 1024:.1f} MB of an estimated "
+            f"{bps * duration / 1024 / 1024:.0f} MB full clip, cap {MAX_CLIP_MB} MB). "
+            f"Full recording stays in Frigate."
+        )
         minutes = max(1, round(duration / 60))
         if LANG == "ru":
-            caption = (f"⚠️ Событие длинное ({minutes} мин), клип целиком не влезает "
-                       f"в Telegram — первые {secs} сек. Полная запись — во Frigate.")
+            caption = f"✂️ Первые {secs} с из {minutes} мин — полное видео во Frigate"
         else:
-            caption = (f"⚠️ Long event ({minutes} min) — the full clip doesn't fit "
-                       f"Telegram, showing the first {secs}s. Full recording is in Frigate.")
+            caption = f"✂️ First {secs}s of {minutes} min — full video in Frigate"
         return data, secs, caption
 
     async def _send_photo_only(self, photo_data: bytes) -> bool:
