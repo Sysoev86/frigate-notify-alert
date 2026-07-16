@@ -18,7 +18,7 @@ import time
 
 import aiohttp
 
-OK, WARN, FAIL = "✅", "⚠️", "❌"
+OK, WARN, FAIL, HINT = "✅", "⚠️", "❌", "💡"
 _fails = 0
 _warns = 0
 
@@ -39,6 +39,11 @@ def fail(msg):
     print(f"{FAIL} {msg}")
 
 
+def hint(msg):
+    """A suggestion, not a problem — doesn't affect the exit code."""
+    print(f"{HINT} {msg}")
+
+
 def load_config():
     try:
         import config as cfg
@@ -51,30 +56,20 @@ def load_config():
 # ------------------------------------------------------------------- config
 
 def check_config(cfg) -> bool:
-    """Static sanity: placeholders left in, empty groups, missing keys."""
-    groups = getattr(cfg, "GROUPS", None)
-    if not isinstance(groups, dict) or not groups:
-        fail("GROUPS is missing or empty in config.py")
-        return False
+    """Static sanity (shared with the services) + hints about settings this
+    config predates — `manage.sh update` never touches config.py, so new
+    options stay invisible otherwise."""
+    import config_check
 
-    bad = []
-    for name in ("TELEGRAM_BOT_TOKEN", "MQTT_BROKER_HOST", "MQTT_USERNAME",
-                 "MQTT_PASSWORD", "FRIGATE_URL"):
-        v = getattr(cfg, name, None)
-        if not isinstance(v, str) or "SET_ME" in v or "ВСТАВЬ" in v:
-            bad.append(name)
-    for gid, g in groups.items():
-        cid = str(g.get("telegram_chat_id", ""))
-        if not cid or "SET_ME" in cid or "ВСТАВЬ" in cid:
-            bad.append(f"GROUPS[{gid}].telegram_chat_id")
-        if not g.get("cameras"):
-            fail(f"GROUPS[{gid}]: 'cameras' list is empty")
+    problems = config_check.errors()
+    for p in problems:
+        fail(f"config.py: {p}")
+    if not problems:
+        ok(f"config.py: {len(cfg.GROUPS)} group(s), no placeholders")
 
-    if bad:
-        fail("config.py still has placeholders / missing values: " + ", ".join(bad))
-        return False
-    ok(f"config.py: {len(groups)} group(s), no placeholders")
-    return True
+    for tip in config_check.hints():
+        hint(tip)
+    return not problems
 
 
 # ------------------------------------------------------------------ frigate

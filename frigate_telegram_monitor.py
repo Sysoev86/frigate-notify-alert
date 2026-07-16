@@ -86,35 +86,7 @@ PROBE_SECONDS = 10   # short slice used to measure the clip's real bitrate
 MAX_TRIM_SECONDS = 300  # never send more than 5 minutes of a trimmed clip
 
 
-def config_errors() -> list:
-    """Static config validation for a clear startup error instead of a traceback.
-    (Deep checks — camera/zone names, MQTT auth, chat access — live in doctor.py.)"""
-    errors = []
-
-    def placeholder(v):
-        return isinstance(v, str) and ("SET_ME" in v or "ВСТАВЬ" in v)
-
-    groups = globals().get("GROUPS")
-    if not isinstance(groups, dict) or not groups:
-        errors.append("GROUPS is missing or empty")
-        return errors
-
-    for name in ("TELEGRAM_BOT_TOKEN", "MQTT_BROKER_HOST", "MQTT_USERNAME",
-                 "MQTT_PASSWORD", "FRIGATE_URL"):
-        v = globals().get(name)
-        if not v or placeholder(v):
-            errors.append(f"{name} is not filled in (placeholder left)")
-
-    for gid, g in groups.items():
-        if not isinstance(g, dict):
-            errors.append(f"GROUPS['{gid}'] must be a dict")
-            continue
-        cid = str(g.get("telegram_chat_id") or "")
-        if not cid or placeholder(cid):
-            errors.append(f"GROUPS['{gid}'].telegram_chat_id is not filled in")
-        if not g.get("cameras"):
-            errors.append(f"GROUPS['{gid}'].cameras is empty")
-    return errors
+import config_check  # noqa: E402  (must come after the config import above)
 
 
 class FrigateTelegramMonitor:
@@ -807,6 +779,11 @@ class FrigateTelegramMonitor:
         self.logger.info(f"📹 Cameras: {', '.join(self.cameras)}")
         self.logger.info(f"🎯 Tracked objects: {', '.join(self.objects)}")
 
+        # Point out settings this config predates (updating via `manage.sh
+        # update` brings new code but never touches config.py)
+        for tip in config_check.hints():
+            self.logger.info(f"💡 {tip}")
+
         self.event_loop = asyncio.get_running_loop()
         self.mqtt_event_queue = asyncio.Queue()
         self.http = aiohttp.ClientSession()
@@ -831,7 +808,7 @@ class FrigateTelegramMonitor:
 
 
 def main():
-    errs = config_errors()
+    errs = config_check.errors()
     if errs:
         print("❌ config.py has problems:")
         for e in errs:

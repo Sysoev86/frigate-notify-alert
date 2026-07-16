@@ -45,6 +45,8 @@ except ModuleNotFoundError as _e:
         raise SystemExit(1)
     raise
 
+import config_check  # noqa: E402  (must come after the config import above)
+
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 MUTE_STATE_FILE = globals().get("MUTE_STATE_FILE") or os.path.join(_SCRIPT_DIR, "mute_state.json")
 STATUS_FILE = os.path.join(_SCRIPT_DIR, "mute_controller_status.json")
@@ -131,26 +133,6 @@ def _minutes_until_morning() -> int:
     if target <= now:
         target += timedelta(days=1)
     return max(1, int((target - now).total_seconds() // 60))
-
-
-def config_errors() -> list:
-    """Static config validation (clear startup error instead of a traceback)."""
-    errors = []
-
-    def placeholder(v):
-        return isinstance(v, str) and ("SET_ME" in v or "ВСТАВЬ" in v)
-
-    groups = globals().get("GROUPS")
-    if not isinstance(groups, dict) or not groups:
-        return ["GROUPS is missing or empty"]
-    token = globals().get("TELEGRAM_BOT_TOKEN")
-    if not token or placeholder(token):
-        errors.append("TELEGRAM_BOT_TOKEN is not filled in (placeholder left)")
-    for gid, g in groups.items():
-        cid = str((g or {}).get("telegram_chat_id") or "")
-        if not cid or placeholder(cid):
-            errors.append(f"GROUPS['{gid}'].telegram_chat_id is not filled in")
-    return errors
 
 
 class MuteController:
@@ -365,7 +347,7 @@ class MuteController:
 
 
 def main():
-    errs = config_errors()
+    errs = config_check.errors()
     if errs:
         print("❌ config.py has problems:")
         for e in errs:
