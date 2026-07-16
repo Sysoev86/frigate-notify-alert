@@ -34,6 +34,8 @@ from telegram import Bot, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.error import TelegramError
 from telegram.request import HTTPXRequest
 
+import sentry_init
+
 try:
     from config import *  # TELEGRAM_BOT_TOKEN, TELEGRAM_PROXY_URL, GROUPS, [MUTE_STATE_FILE, LANG]
 except ModuleNotFoundError as _e:
@@ -356,6 +358,8 @@ def main():
             print(f"   - {e}")
         print("Fix config.py (see config.example.py) or run: ./manage.sh doctor")
         sys.exit(1)
+
+    sentry_init.init("frigate-mute-controller")
 
     controller = MuteController()
     try:

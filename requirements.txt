@@ -3,3 +3,6 @@ aiohttp>=3.8.0
 paho-mqtt>=1.6.0
 python-telegram-bot>=20.0
 asyncio-mqtt>=0.11.0
+# Optional: error reporting to a Sentry-compatible server (see .env.example).
+# Harmless without GLITCHTIP_DSN — the code stays silent.
+sentry-sdk>=2.0.0

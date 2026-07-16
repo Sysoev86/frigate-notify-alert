@@ -33,6 +33,8 @@ from telegram import Bot, InputMediaPhoto, InputMediaVideo
 from telegram.error import TelegramError
 from telegram.request import HTTPXRequest
 
+import sentry_init
+
 try:
     from config import *
 except ModuleNotFoundError as _e:
@@ -663,6 +665,7 @@ class FrigateTelegramMonitor:
             except asyncio.TimeoutError:
                 continue  # idle tick
             except Exception as e:
+                sentry_init.capture(e)
                 self.logger.error(f"❌ Error processing MQTT event: {e}")
 
     # ------------------------------------------------------------------- main
@@ -715,12 +718,15 @@ def main():
         print("Available groups:", list(GROUPS.keys()))
         sys.exit(1)
 
+    sentry_init.init(f"frigate-monitor-{group_id}")
+
     monitor = FrigateTelegramMonitor(group_id)
     try:
         asyncio.run(monitor.start_monitoring())
     except KeyboardInterrupt:
         print("\n🛑 Shutting down...")
     except Exception as e:
+        sentry_init.capture(e)
         print(f"❌ Fatal error: {e}")
         sys.exit(1)
 
