@@ -6,6 +6,11 @@
 sends the event's **photo + video** to your chat. Multiple camera groups (each to its
 own chat), optional zone filtering, and in‑chat pause buttons — all in Telegram.
 
+**First and foremost, it's a lightweight alarm.** Events reach Telegram as fast as
+possible — in real time over MQTT (a push, not scheduled polling) — so you can react to
+unauthorized access. Want it audible instead of silent? Set `silent: False` on the group.
+Walking through the frame yourself? Pause it with a button right in the chat.
+
 <p align="center">
   <img src="docs/telegram-example.jpg" alt="Example: Frigate detection snapshot with bounding box + video clip in a Telegram chat" width="300">
   <br><sub>How it looks in the chat: for each event — a snapshot with a detection box and a video clip.</sub>
@@ -26,6 +31,8 @@ own chat), optional zone filtering, and in‑chat pause buttons — all in Teleg
 - [Versioning](#versioning) · [License](#license)
 
 ## Features
+- 🚨 **Works as an alarm:** events in real time (MQTT push) so you can react to unauthorized access; audible with `silent: False`.
+- ⏰ **Instant text after a quiet spell** (optional `IDLE_ALERT_AFTER`, off by default): if there were no events for, say, an hour, the first one arrives as an instant, audible text — before the photo/video.
 - 📸 Photo + video of the event in Telegram (media group; silent by default, `silent: False` for loud).
 - 📹 Multiple camera groups — each to its own chat.
 - 🧭 Zone filtering (`zones`) — notify only when the object enters a chosen Frigate zone.
@@ -281,8 +288,11 @@ need `sudo`.
 ## How it works
 The script gets events in real time from the MQTT topic `frigate/events` (with `/api/events`
 polling as a fallback), filters them by camera, object and (optionally) zone, waits for the
-snapshot + clip to be ready, and sends both to the chat as a media group. On startup it
-ignores events that finished **before** launch, so it doesn't spam history. The pause
+snapshot + clip to be ready, and sends both to the chat as a media group. Delivery is as
+fast as possible: events are pushed over MQTT, with API polling only as a fallback when
+MQTT is unavailable — which is why it doubles as a lightweight alarm (set `silent: False`
+for an audible alert). On startup it ignores events that finished **before** launch, so it
+doesn't spam history. The pause
 controller (`mute_controller.py`) is a separate process: it listens for button taps and
 writes `mute_state.json`, which the monitors read before sending.
 

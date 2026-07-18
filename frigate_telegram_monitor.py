@@ -61,6 +61,11 @@ MEDIA_RETRY_DELAY = int(globals().get("MEDIA_RETRY_DELAY") or 3)
 # Retry the send a few times with growing backoff before giving up.
 TELEGRAM_SEND_RETRIES = int(globals().get("TELEGRAM_SEND_RETRIES") or 3)
 TELEGRAM_SEND_BACKOFF = int(globals().get("TELEGRAM_SEND_BACKOFF") or 5)  # sec, ×attempt
+# Alarm feature: after this many seconds without any event, the FIRST event that
+# breaks the silence gets an instant text heads-up — sent before the photo+video
+# (which take a few seconds to finalize), so a possible unauthorized entry is
+# flagged as fast as possible. 0 = off (nothing changes for existing installs).
+IDLE_ALERT_AFTER = int(globals().get("IDLE_ALERT_AFTER") or 0)
 # Shared pause-state file written by mute_controller, read by the monitors.
 MUTE_STATE_FILE = globals().get("MUTE_STATE_FILE") or os.path.join(_SCRIPT_DIR, "mute_state.json")
 # Language of chat-facing texts (startup notice); logs are always English.
@@ -151,6 +156,12 @@ class FrigateTelegramMonitor:
 
         # Events whose media isn't ready yet: {event_id: (event, retry_count)}
         self.retry_events: Dict[str, tuple] = {}
+
+        # Alarm (IDLE_ALERT_AFTER): when the last qualifying event happened, and
+        # the ids we've already sent an idle-break heads-up for. Starts "now" so
+        # a fresh boot doesn't fire on its very first event.
+        self._last_event_ts = self.startup_ts
+        self._idle_notified: set = set()
 
         # Real-time path
         self.mqtt_client = None
@@ -275,6 +286,10 @@ class FrigateTelegramMonitor:
                 )
                 continue
 
+            # Alarm: first event after a long quiet spell -> instant text now,
+            # before we wait on the media (fires once per id across both paths).
+            await self._maybe_idle_alert(event)
+
             # Media not ready yet -> park it in the retry queue
             if not has_snapshot or not has_clip:
                 if event_id not in self.retry_events:
@@ -375,6 +390,68 @@ class FrigateTelegramMonitor:
             overflow = len(self.processed_events) - self.max_processed_events + 100
             for old_id in sorted(self.processed_events)[:overflow]:
                 self.processed_events.discard(old_id)
+
+    # -------------------------------------------------------------- idle alarm
+
+    def _fmt_gap(self, seconds: float) -> str:
+        """Human-readable idle duration for the alarm text."""
+        total_m = int(seconds // 60)
+        h, m = divmod(total_m, 60)
+        if LANG == "ru":
+            if h and m:
+                return f"{h} ч {m} мин"
+            return f"{h} ч" if h else f"{m} мин"
+        if h and m:
+            return f"{h} h {m} min"
+        return f"{h} h" if h else f"{m} min"
+
+    async def _maybe_idle_alert(self, event: Dict[str, Any]):
+        """Alarm heads-up: the first event after a long quiet spell gets an
+        instant text — sent BEFORE the photo+video album (which needs a few
+        seconds to finalize), so a possible unauthorized entry is flagged as
+        fast as possible.
+
+        No-op unless IDLE_ALERT_AFTER is set. Fires at most once per event, from
+        whichever path (MQTT or polling) reaches it first. The idle clock is
+        updated for every qualifying event — including muted ones (activity is
+        activity) — so the gap always reflects the real quiet period."""
+        if not IDLE_ALERT_AFTER:
+            return
+        event_id = event.get("id")
+        if not event_id or event_id in self._idle_notified:
+            return
+        end_time = event.get("end_time")
+        if end_time and end_time < self.startup_ts:
+            return  # history from before we started — not a live event
+
+        self._idle_notified.add(event_id)
+        if len(self._idle_notified) > self.max_processed_events:
+            for old in sorted(self._idle_notified)[:200]:
+                self._idle_notified.discard(old)
+
+        gap = time.time() - self._last_event_ts
+        self._last_event_ts = time.time()
+        if gap < IDLE_ALERT_AFTER or self._is_muted():
+            return
+
+        obj = event.get("label") or ("объект" if LANG == "ru" else "object")
+        cam = event.get("camera")
+        where = f" @ {cam}" if cam else ""
+        if LANG == "ru":
+            text = (f"🚨 Движение после тишины ({self._fmt_gap(gap)}): {obj}{where}. "
+                    f"Фото и видео сейчас придут.")
+        else:
+            text = (f"🚨 Motion after {self._fmt_gap(gap)} of quiet: {obj}{where}. "
+                    f"Photo and video to follow.")
+        try:
+            await self.bot.send_message(
+                chat_id=self.group_config["telegram_chat_id"],
+                text=text,
+                disable_notification=False,  # the alarm is meant to be noticed
+            )
+            self.logger.info(f"🚨 Idle-break alert sent (quiet {self._fmt_gap(gap)})")
+        except TelegramError as e:
+            self.logger.error(f"❌ Telegram error (idle alert): {e}")
 
     # ---------------------------------------------------------------- sending
 
@@ -797,6 +874,10 @@ class FrigateTelegramMonitor:
                 self.processed_events.add(event_id)
 
                 self.logger.info(f"📨 Handling MQTT event: {object_type}@{camera} ({event_id})")
+
+                # Alarm: first event after a long quiet spell -> instant text now,
+                # before the API fetch + media wait below.
+                await self._maybe_idle_alert(event)
 
                 # Fetch the full event from the API (it may lag a few seconds)
                 full_event = None

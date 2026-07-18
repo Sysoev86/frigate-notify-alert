@@ -141,3 +141,15 @@ TELEGRAM_SEND_RETRIES = 3  # retries when the send to Telegram itself times out
 TELEGRAM_SEND_BACKOFF = 5  # seconds before a resend, grows ×attempt
 MAX_CLIP_MB = 45           # clip size cap (Telegram bots can't upload > 50 MB);
                            # oversized events get a trimmed clip (first N seconds) + note
+
+# --- Alarm: instant heads-up after a quiet period (optional) ----------------
+# Use the bot as a simple intrusion alarm. If there were NO events for at least
+# this many seconds, the first event that breaks the silence gets an instant
+# text message ("🚨 Motion after 2 h of quiet …") sent immediately — BEFORE the
+# usual photo+video, which take a few seconds to finalize. The point: if it's
+# been quiet all night and something moves, you're told at once, so you can
+# react to a possible unauthorized entry without waiting for the media.
+# The text is always sent with sound (even if the group is otherwise silent).
+# 0 = OFF (default): behave exactly as before, no idle alerts.
+# Example: 3600 = alert on the first event after an hour of quiet.
+IDLE_ALERT_AFTER = 0

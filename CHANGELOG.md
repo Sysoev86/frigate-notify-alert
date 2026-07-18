@@ -6,6 +6,20 @@ All notable changes. Format follows [Semantic Versioning](https://semver.org/):
 `MAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
+### Added
+- **Alarm mode — instant heads-up after a quiet spell** (`IDLE_ALERT_AFTER`, off by
+  default). Positions the bot as a lightweight intrusion alarm: if there were no events
+  for the configured time (e.g. an hour), the first event that breaks the silence sends
+  an immediate, audible text ("🚨 Motion after 2 h of quiet — person @ camera; photo and
+  video to follow") — *before* the photo+video, which take a few seconds to finalize. So
+  a possible unauthorized entry is flagged at once, without waiting for the media. Fires
+  once per event across both the MQTT and polling paths; respects pause; muted events
+  still reset the idle clock. `0` disables it (default), so existing installs are
+  unaffected.
+- **README now leads with the alarm use-case**: events are pushed over MQTT (polling is
+  only a fallback) so they reach Telegram as fast as possible; set `silent: False` for an
+  audible alert.
+
 ### Fixed
 - **Alert no longer dropped when only the clip is missing.** If Frigate reported the event
   as ready but never actually served `clip.mp4` within the retry window, the whole
