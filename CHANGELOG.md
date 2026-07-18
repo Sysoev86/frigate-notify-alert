@@ -5,6 +5,23 @@
 All notable changes. Format follows [Semantic Versioning](https://semver.org/):
 `MAJOR.MINOR.PATCH`.
 
+## [Unreleased]
+### Fixed
+- **Alert no longer dropped when only the clip is missing.** If Frigate reported the event
+  as ready but never actually served `clip.mp4` within the retry window, the whole
+  notification was discarded — including a perfectly good snapshot. The chat now gets a
+  **photo-only** alert in that case (with a "clip not available yet" caption), instead of
+  nothing. For a barrier/entrance camera the photo is the point of the alert.
+- **Transient Telegram timeout no longer drops the alert.** A single `Timed out` /
+  network blip when sending to `api.telegram.org` used to lose the notification outright.
+  The send is now retried a few times with growing backoff (`TELEGRAM_SEND_RETRIES`,
+  `TELEGRAM_SEND_BACKOFF`); persistent non-transient errors (bad chat, bad request) still
+  fail fast.
+### Changed
+- The "media never became available" error now records **which** asset was missing
+  (photo/clip) and **why** (HTTP status / timeout / half-written file), so the tracker
+  says what actually went wrong instead of just "after N attempts".
+
 ## [1.3.4] — 2026-07-16
 ### Fixed
 - **OOM on huge clips.** Long events (e.g. a person working in a warehouse for an hour)

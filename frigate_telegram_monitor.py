@@ -30,7 +30,7 @@ from typing import Any, Dict, Optional
 import aiohttp
 import paho.mqtt.client as mqtt
 from telegram import Bot, InputMediaPhoto, InputMediaVideo
-from telegram.error import TelegramError
+from telegram.error import TelegramError, TimedOut, NetworkError
 from telegram.request import HTTPXRequest
 
 import sentry_init
@@ -57,6 +57,10 @@ LOG_FORMAT = str(globals().get("LOG_FORMAT") or "%(asctime)s - %(levelname)s - %
 STATS_INTERVAL = int(globals().get("STATS_INTERVAL") or 60)
 MEDIA_RETRY_ATTEMPTS = int(globals().get("MEDIA_RETRY_ATTEMPTS") or 15)
 MEDIA_RETRY_DELAY = int(globals().get("MEDIA_RETRY_DELAY") or 3)
+# A single transient timeout to api.telegram.org used to drop the whole alert.
+# Retry the send a few times with growing backoff before giving up.
+TELEGRAM_SEND_RETRIES = int(globals().get("TELEGRAM_SEND_RETRIES") or 3)
+TELEGRAM_SEND_BACKOFF = int(globals().get("TELEGRAM_SEND_BACKOFF") or 5)  # sec, ×attempt
 # Shared pause-state file written by mute_controller, read by the monitors.
 MUTE_STATE_FILE = globals().get("MUTE_STATE_FILE") or os.path.join(_SCRIPT_DIR, "mute_state.json")
 # Language of chat-facing texts (startup notice); logs are always English.
@@ -106,6 +110,10 @@ class FrigateTelegramMonitor:
             "telegram_sent": 0,
             "errors": 0,
         }
+
+        # Why the last media download failed — surfaced in the drop/fallback log
+        # so "clip never arrived" tells us HTTP 404 vs timeout vs half-written.
+        self._last_dl_reason: Optional[str] = None
 
         # Telegram bot (generous timeouts; optional proxy for blocked ISPs)
         request_kw: dict = {
@@ -422,6 +430,7 @@ class FrigateTelegramMonitor:
                 url, timeout=aiohttp.ClientTimeout(total=timeout_s)
             ) as response:
                 if response.status != 200:
+                    self._last_dl_reason = f"HTTP {response.status}"
                     self.logger.debug(f"{label}: HTTP {response.status}")
                     return None
                 if max_bytes and response.content_length and response.content_length > max_bytes:
@@ -440,10 +449,13 @@ class FrigateTelegramMonitor:
                         )
                         return TOO_BIG
                 if len(data) < MIN_MEDIA_BYTES:
+                    self._last_dl_reason = f"only {len(data)}B (<{MIN_MEDIA_BYTES})"
                     self.logger.debug(f"{label}: too small ({len(data)} bytes), not ready")
                     return None
+                self._last_dl_reason = None
                 return bytes(data)
         except Exception as e:
+            self._last_dl_reason = f"{type(e).__name__}: {e}"
             self.logger.debug(f"{label}: download error: {e}")
             return None
 
@@ -494,8 +506,23 @@ class FrigateTelegramMonitor:
             if attempt < MEDIA_RETRY_ATTEMPTS:
                 await asyncio.sleep(MEDIA_RETRY_DELAY)
 
-        self.logger.error(f"❌ Media never became available for {event_id} "
-                          f"after {MEDIA_RETRY_ATTEMPTS} attempts")
+        # The snapshot arrived but Frigate never served the clip within the
+        # window. Don't drop the whole alert — the chat still gets the photo,
+        # which for a barrier/entrance camera is the point of the notification.
+        if isinstance(photo_data, bytes):
+            self.logger.warning(
+                f"🎥 {event_id}: clip unavailable after {MEDIA_RETRY_ATTEMPTS} "
+                f"attempts (last: {self._last_dl_reason}) — sending photo-only"
+            )
+            return await self._send_photo_only(photo_data, reason="clip_unavailable")
+
+        self.logger.error(
+            f"❌ Media never became available for {event_id} after "
+            f"{MEDIA_RETRY_ATTEMPTS} attempts "
+            f"(photo={'ok' if photo_data else 'no'}, "
+            f"clip={'ok' if isinstance(video_data, bytes) else 'no'}, "
+            f"last: {self._last_dl_reason})"
+        )
         return False
 
     async def _download_trimmed_clip(self, event: Dict[str, Any], cap: int):
@@ -562,14 +589,20 @@ class FrigateTelegramMonitor:
             caption = f"✂️ First {secs}s of {minutes} min — full video in Frigate"
         return data, secs, caption
 
-    async def _send_photo_only(self, photo_data: bytes) -> bool:
-        """Very last resort (clip oversized AND the range API unavailable):
-        deliver at least the snapshot with an explanatory caption."""
-        if LANG == "ru":
-            caption = (f"🎥 Клип события слишком большой для Telegram (> {MAX_CLIP_MB} МБ) — "
-                       f"смотри запись во Frigate")
+    async def _send_photo_only(self, photo_data: bytes,
+                               reason: str = "too_large") -> bool:
+        """Last resort — deliver at least the snapshot with an explanatory
+        caption. `reason` picks the wording: the clip was oversized
+        ("too_large") or Frigate never served it in time ("clip_unavailable")."""
+        if reason == "clip_unavailable":
+            caption = ("🎥 Клип пока недоступен во Frigate — смотри запись там"
+                       if LANG == "ru" else
+                       "🎥 The clip isn’t available in Frigate yet — watch the recording there")
         else:
-            caption = (f"🎥 The event clip is too large for Telegram (> {MAX_CLIP_MB} MB) — "
+            caption = (f"🎥 Клип события слишком большой для Telegram (> {MAX_CLIP_MB} МБ) — "
+                       f"смотри запись во Frigate"
+                       if LANG == "ru" else
+                       f"🎥 The event clip is too large for Telegram (> {MAX_CLIP_MB} MB) — "
                        f"watch the recording in Frigate")
         try:
             await self.bot.send_photo(
@@ -578,7 +611,7 @@ class FrigateTelegramMonitor:
                 caption=caption,
                 disable_notification=self.silent,
             )
-            self.logger.info("✅ Photo-only sent (clip over the size limit)")
+            self.logger.info(f"✅ Photo-only sent ({reason})")
             return True
         except TelegramError as e:
             self.logger.error(f"❌ Telegram error (photo-only): {e}")
@@ -613,22 +646,41 @@ class FrigateTelegramMonitor:
     async def _send_media_group(self, photo_data: bytes, video_data: bytes,
                                 caption: Optional[str] = None) -> bool:
         """Send photo + video to the group's chat as one media group.
-        A caption on the first item shows up as the album caption."""
-        try:
-            await self.bot.send_media_group(
-                chat_id=self.group_config["telegram_chat_id"],
-                media=[InputMediaPhoto(media=photo_data, caption=caption),
-                       InputMediaVideo(media=video_data)],
-                disable_notification=self.silent,
-            )
-            self.logger.info("✅ Media group sent")
-            return True
-        except TelegramError as e:
-            self.logger.error(f"❌ Telegram error: {e}")
-            return False
-        except Exception as e:
-            self.logger.error(f"❌ Failed to send media: {e}")
-            return False
+        A caption on the first item shows up as the album caption.
+
+        A transient timeout / network blip to api.telegram.org is retried with
+        backoff — one hiccup used to drop the alert outright. (A timeout can in
+        theory fire after Telegram already accepted the album, so a retry may
+        rarely duplicate it — acceptable for an entrance camera where a missed
+        alert is the worse failure.) Other Telegram errors — bad chat, bad
+        request — won't fix themselves, so they fail fast."""
+        for attempt in range(1, TELEGRAM_SEND_RETRIES + 1):
+            try:
+                await self.bot.send_media_group(
+                    chat_id=self.group_config["telegram_chat_id"],
+                    media=[InputMediaPhoto(media=photo_data, caption=caption),
+                           InputMediaVideo(media=video_data)],
+                    disable_notification=self.silent,
+                )
+                self.logger.info("✅ Media group sent")
+                return True
+            except (TimedOut, NetworkError) as e:
+                if attempt < TELEGRAM_SEND_RETRIES:
+                    self.logger.warning(
+                        f"⏳ Telegram {type(e).__name__} "
+                        f"(attempt {attempt}/{TELEGRAM_SEND_RETRIES}) — retrying"
+                    )
+                    await asyncio.sleep(TELEGRAM_SEND_BACKOFF * attempt)
+                    continue
+                self.logger.error(f"❌ Telegram error: {e}")
+                return False
+            except TelegramError as e:
+                self.logger.error(f"❌ Telegram error: {e}")
+                return False
+            except Exception as e:
+                self.logger.error(f"❌ Failed to send media: {e}")
+                return False
+        return False
 
     # ------------------------------------------------------------------ stats
 
