@@ -82,8 +82,8 @@ QUEUE_MAX_RETRIES = 10     # polls to wait for media before dropping an event
 
 # Telegram bots can't upload files over 50 MB; long events (a person working in
 # the room for an hour) produce clips of hundreds of MB — downloading those into
-# RAM got real installs OOM-killed. Cap the clip: oversized events are sent as
-# photo-only with a note. Override with MAX_CLIP_MB in config.py.
+# RAM got real installs OOM-killed. Cap the clip: oversized events fall back to
+# a trimmed clip, then a short text note. Override with MAX_CLIP_MB in config.py.
 MAX_CLIP_MB = int(globals().get("MAX_CLIP_MB") or 45)
 TOO_BIG = object()  # sentinel returned by _download when the cap is exceeded
 PROBE_SECONDS = 10   # short slice used to measure the clip's real bitrate
@@ -467,7 +467,8 @@ class FrigateTelegramMonitor:
         used to OOM the process) degrades to a TRIMMED clip — the first N
         seconds fetched via Frigate's time-range recordings API — so the chat
         still gets the usual compact photo+video album, just with a caption.
-        Photo-only is the very last resort."""
+        A short text notice is the very last resort — never a lone photo, which
+        Telegram would render oversized."""
         event_id = event.get("id")
         photo_url = f"{FRIGATE_URL}/api/events/{event_id}/snapshot.jpg?crop=1"
         video_url = f"{FRIGATE_URL}/api/events/{event_id}/clip.mp4"
@@ -497,7 +498,7 @@ class FrigateTelegramMonitor:
                 return await self._send_media_group(photo_data, video_data, caption)
 
             if photo_data is not None and video_data is TOO_BIG:
-                return await self._send_photo_only(photo_data)
+                return await self._send_text_notice(event, reason="too_large")
 
             self.logger.debug(
                 f"⏳ {event_id}: media not ready (attempt {attempt}/{MEDIA_RETRY_ATTEMPTS}, "
@@ -507,14 +508,15 @@ class FrigateTelegramMonitor:
                 await asyncio.sleep(MEDIA_RETRY_DELAY)
 
         # The snapshot arrived but Frigate never served the clip within the
-        # window. Don't drop the whole alert — the chat still gets the photo,
-        # which for a barrier/entrance camera is the point of the notification.
+        # window. Don't drop the whole alert — but don't send a lone photo
+        # either (a single item renders oversized in Telegram); a compact text
+        # heads-up keeps the alert without the ugly full-size image.
         if isinstance(photo_data, bytes):
             self.logger.warning(
                 f"🎥 {event_id}: clip unavailable after {MEDIA_RETRY_ATTEMPTS} "
-                f"attempts (last: {self._last_dl_reason}) — sending photo-only"
+                f"attempts (last: {self._last_dl_reason}) — text notice only"
             )
-            return await self._send_photo_only(photo_data, reason="clip_unavailable")
+            return await self._send_text_notice(event, reason="clip_unavailable")
 
         self.logger.error(
             f"❌ Media never became available for {event_id} after "
@@ -589,32 +591,38 @@ class FrigateTelegramMonitor:
             caption = f"✂️ First {secs}s of {minutes} min — full video in Frigate"
         return data, secs, caption
 
-    async def _send_photo_only(self, photo_data: bytes,
-                               reason: str = "too_large") -> bool:
-        """Last resort — deliver at least the snapshot with an explanatory
-        caption. `reason` picks the wording: the clip was oversized
-        ("too_large") or Frigate never served it in time ("clip_unavailable")."""
+    async def _send_text_notice(self, event: Dict[str, Any],
+                                reason: str = "too_large") -> bool:
+        """Compact text-only heads-up when the photo+video album can't be built.
+
+        We deliberately never fall back to a lone photo (or video): Telegram
+        renders a single media item at full size, which looks bad in the chat —
+        the album is what keeps previews compact. A one-line text with the
+        object and camera keeps the alert useful without the oversized image.
+        `reason`: clip oversized ("too_large") or Frigate never served it
+        ("clip_unavailable")."""
+        obj = event.get("label") or ("объект" if LANG == "ru" else "object")
+        cam = event.get("camera")
+        where = f" @ {cam}" if cam else ""
         if reason == "clip_unavailable":
-            caption = ("🎥 Клип пока недоступен во Frigate — смотри запись там"
-                       if LANG == "ru" else
-                       "🎥 The clip isn’t available in Frigate yet — watch the recording there")
+            body = ("клип пока недоступен во Frigate"
+                    if LANG == "ru" else "the clip isn’t available in Frigate yet")
         else:
-            caption = (f"🎥 Клип события слишком большой для Telegram (> {MAX_CLIP_MB} МБ) — "
-                       f"смотри запись во Frigate"
-                       if LANG == "ru" else
-                       f"🎥 The event clip is too large for Telegram (> {MAX_CLIP_MB} MB) — "
-                       f"watch the recording in Frigate")
+            body = (f"клип слишком большой для Telegram (> {MAX_CLIP_MB} МБ)"
+                    if LANG == "ru" else
+                    f"the clip is too large for Telegram (> {MAX_CLIP_MB} MB)")
+        tail = "смотри запись во Frigate" if LANG == "ru" else "watch the recording in Frigate"
+        text = f"🎥 {obj}{where}: {body} — {tail}"
         try:
-            await self.bot.send_photo(
+            await self.bot.send_message(
                 chat_id=self.group_config["telegram_chat_id"],
-                photo=photo_data,
-                caption=caption,
+                text=text,
                 disable_notification=self.silent,
             )
-            self.logger.info(f"✅ Photo-only sent ({reason})")
+            self.logger.info(f"✅ Text notice sent ({reason})")
             return True
         except TelegramError as e:
-            self.logger.error(f"❌ Telegram error (photo-only): {e}")
+            self.logger.error(f"❌ Telegram error (text notice): {e}")
             return False
 
     async def _send_startup_notice(self):

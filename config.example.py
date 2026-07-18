@@ -135,8 +135,8 @@ LOG_FORMAT = "%(asctime)s - %(levelname)s - %(message)s"
 STATS_INTERVAL = 60        # how often (seconds) to write stats to the log
 MEDIA_RETRY_ATTEMPTS = 15  # how many times to retry downloading photo/video
 MEDIA_RETRY_DELAY = 3      # seconds between download retries
-                           # (if the clip never downloads but the photo did, the
-                           #  alert is still sent photo-only rather than dropped)
+                           # (if the clip never downloads, a short text notice is
+                           #  sent — never a lone photo, which renders oversized)
 TELEGRAM_SEND_RETRIES = 3  # retries when the send to Telegram itself times out
 TELEGRAM_SEND_BACKOFF = 5  # seconds before a resend, grows ×attempt
 MAX_CLIP_MB = 45           # clip size cap (Telegram bots can't upload > 50 MB);

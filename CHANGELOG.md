@@ -9,9 +9,10 @@ All notable changes. Format follows [Semantic Versioning](https://semver.org/):
 ### Fixed
 - **Alert no longer dropped when only the clip is missing.** If Frigate reported the event
   as ready but never actually served `clip.mp4` within the retry window, the whole
-  notification was discarded — including a perfectly good snapshot. The chat now gets a
-  **photo-only** alert in that case (with a "clip not available yet" caption), instead of
-  nothing. For a barrier/entrance camera the photo is the point of the alert.
+  notification was discarded. The chat now gets a compact **text notice** in that case
+  ("clip not available yet — watch in Frigate", with the object and camera) instead of
+  nothing. A lone photo is deliberately *not* sent: Telegram renders a single media item
+  oversized, so media always goes as a photo+video album or not at all.
 - **Transient Telegram timeout no longer drops the alert.** A single `Timed out` /
   network blip when sending to `api.telegram.org` used to lose the notification outright.
   The send is now retried a few times with growing backoff (`TELEGRAM_SEND_RETRIES`,
